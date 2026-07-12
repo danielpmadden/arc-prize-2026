@@ -1,106 +1,55 @@
-# ARC Prize 2026 Rule-Based Solver
+# ARC Prize 2026 Solver
 
-A small Python rule-based solver for ARC-AGI 2026 experimentation. The active solver lives in `src/arc_solver.py`, with a root-level compatibility launcher preserved as `arc_solver.py` for existing commands.
+## Overview
 
-Current confirmed training score: **39/1076 = 3.625%**.
+This repository contains a compact, rule-based solver for ARC Prize 2026 / ARC-AGI experimentation. The focus is on deterministic transformations, fast training-set scoring, and careful promotion of rules that improve exact-match performance.
 
-## Requirements
+## Current Status
 
-- Python 3.10+
-- No required third-party Python packages for the solver CLI
+Training score: **49/1076 = 4.554%**.
 
-## File Structure
+## Repository Layout
 
 ```text
-.
-├── arc_solver.py                  # Compatibility launcher
-├── src/
-│   └── arc_solver.py              # Active solver implementation
-├── data/                          # ARC challenge, solution, and sample JSON files
-├── checkpoints/                   # Historical solver checkpoints
-├── outputs/                       # Generated submissions and run artifacts
-└── README.md
+arc_solver.py        # Root CLI entry point
+src/arc_solver/     # Production solver package
+checkpoints/        # Solver snapshots for known milestones
+tools/rule_lab.py   # Experimental rule-candidate evaluator
+tools/              # Supporting development tools
+data/               # ARC challenge and solution JSON files
+outputs/            # Generated local run artifacts
 ```
 
-## Common Commands
+## Solver Architecture
 
-Run the full training score:
+The solver loads ARC tasks, fits a prioritized list of hand-written rules against each task's training examples, and emits predictions from the first rule that matches. Production logic is organized under `src/arc_solver/`, with specialized rules separated from shared grid utilities, transforms, scoring, and CLI code.
+
+## Rule Lab
+
+The rule lab is used to evaluate experimental rule families before promotion. It reports candidates that solve additional tasks without changing the production solver until a rule is deliberately moved into the solver package.
+
+## Running
+
+Run the main training score:
 
 ```bash
 python arc_solver.py --challenges data/arc-agi_training_challenges.json --progress-every 100
 ```
 
-Run a first 10 task smoke test:
+Run the rule lab for remaining new-hit candidates:
 
 ```bash
-python arc_solver.py --challenges data/arc-agi_training_challenges.json --progress-every 1 --stop-after 10
+python tools/rule_lab.py --all --only-new-hits
 ```
 
-Inspect a task:
+## Development Workflow
 
-```bash
-python arc_solver.py --challenges data/arc-agi_training_challenges.json --inspect <task_id>
-```
+- Keep solver changes small and deterministic.
+- Promote only rules that improve or preserve the confirmed score.
+- Re-run the full training score after solver changes.
+- Use the rule lab for experiments before changing production logic.
+- Create a checkpoint after each confirmed score improvement.
 
-Generate a test submission:
+## Checkpoints and Milestones
 
-```bash
-python arc_solver.py --challenges data/arc-agi_test_challenges.json --out outputs/test_submission.json --no-auto-solutions
-```
-
-Restore a checkpoint:
-
-```bash
-cp checkpoints/arc_solver_checkpoint_39.py src/arc_solver.py
-```
-
-The launcher also supports old-style bare filenames when possible by checking both the repository root and `data/`:
-
-```bash
-python arc_solver.py --challenges arc-agi_training_challenges.json --progress-every 100
-```
-
-## Current Checkpoint History
-
-- `24` — `checkpoints/arc_solver_checkpoint_24.py`
-- `32` — `checkpoints/arc_solver_checkpoint_32.py`
-- `34` — `checkpoints/arc_solver_checkpoint_34.py`
-- `36` — `checkpoints/arc_solver_checkpoint_36.py`
-- `38` — `checkpoints/arc_solver_checkpoint_38.py`
-- `39` — `checkpoints/arc_solver_checkpoint_39.py`
-
-## Development Philosophy
-
-- Change one function at a time.
-- Add or remove one `fit_rules` line at a time.
-- Run a full-score test after every solver change.
-- Keep only rules that improve score.
-- Checkpoint after every improvement.
-
-## Known Useful Rule Families
-
-Rules currently worth preserving include transformations for intersection bars, enclosed region filling, rectangle-size fills, vertical periodic extension, staircase components, 5x5 cross expansion, symmetry completion, block compression, nonzero translation, and color-mapped nonzero translation.
-
-In particular, keep the existing working rules such as:
-
-- `split_intersection_bar`
-- `fill_enclosed_regions`
-- `fill_rectangles_by_size`
-- `extend_vertical_period`
-- `staircase_components`
-- `expand_crosses_5x5`
-- `complete_symmetry`
-- `block_compress`
-- `translate_nonzero`
-- `translate_nonzero_color_map`
-
-## Rejected Experiments
-
-Do not re-add these unless a future change clearly proves an improvement:
-
-- `fit_project_profile`
-- `fit_complete_rot180_symmetry`
-- `fit_filter_color`
-- `fit_crop_selected_component`
-- `fit_gridline_cell_compress`
-- `fit_crop_then_upscale`
+Detailed milestone history and checkpoint notes live in [`CHECKPOINTS.md`](CHECKPOINTS.md). The latest checkpoint captures the 49-hit solver state.
