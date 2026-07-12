@@ -1333,3 +1333,148 @@ FAMILY_ALIASES = {
     "component_copy": "component_move_or_copy_by_offset",
     "hole_fill": "bounded_hole_and_region_fill_variants",
 }
+
+# Experimental narrow family: connect_components_by_shortest_bridge
+
+def _comp_color(g: Grid, comp: list[tuple[int, int]]) -> int:
+    return g[comp[0][0]][comp[0][1]]
+
+
+def _selected_component_pairs(g: Grid, selector: str) -> list[tuple[list[tuple[int, int]], list[tuple[int, int]]]]:
+    comps = _components4(g)
+    if len(comps) < 2:
+        return []
+    pairs = []
+    if selector == "two_components_only" and len(comps) == 2:
+        pairs = [(comps[0], comps[1])]
+    elif selector == "same_color_pair":
+        pairs = [(a, b) for i, a in enumerate(comps) for b in comps[i + 1:] if _comp_color(g, a) == _comp_color(g, b)]
+    elif selector == "different_color_pair":
+        pairs = [(a, b) for i, a in enumerate(comps) for b in comps[i + 1:] if _comp_color(g, a) != _comp_color(g, b)]
+    elif selector == "largest_two":
+        ss = sorted(comps, key=lambda c: (-len(c), min(c)))
+        if len(ss) >= 2 and (len(ss) == 2 or len(ss[1]) > len(ss[2])):
+            pairs = [(ss[0], ss[1])]
+    elif selector == "nearest_pair":
+        allp = []
+        for i, a in enumerate(comps):
+            for b in comps[i + 1:]:
+                d = min(abs(r - rr) + abs(c - cc) for r, c in a for rr, cc in b)
+                allp.append((d, min(a), min(b), a, b))
+        if allp:
+            allp.sort(key=lambda x: (x[0], x[1], x[2]))
+            if len(allp) == 1 or allp[0][0] < allp[1][0]:
+                pairs = [(allp[0][3], allp[0][4])]
+    elif selector == "unique_color_pair":
+        by: dict[int, list[list[tuple[int, int]]]] = {}
+        for c in comps:
+            by.setdefault(_comp_color(g, c), []).append(c)
+        singles = [v[0] for _, v in sorted(by.items()) if len(v) == 1]
+        if len(singles) == 2:
+            pairs = [(singles[0], singles[1])]
+    return pairs
+
+
+def _nearest_cells(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    ds = [(abs(r - rr) + abs(c - cc), (r, c), (rr, cc)) for r, c in a for rr, cc in b]
+    if not ds:
+        return []
+    m = min(d for d, _, _ in ds)
+    return [(x, y) for d, x, y in ds if d == m]
+
+
+def _bridge_cells_between(p: tuple[int, int], q: tuple[int, int], mode: str) -> set[tuple[int, int]] | None:
+    r0, c0 = p; r1, c1 = q
+    cells: list[tuple[int, int]] = []
+    if mode == "straight_if_aligned":
+        if r0 == r1:
+            cells = [(r0, c) for c in range(min(c0, c1) + 1, max(c0, c1))]
+        elif c0 == c1:
+            cells = [(r, c0) for r in range(min(r0, r1) + 1, max(r0, r1))]
+        else:
+            return None
+    elif mode in ("horizontal_then_vertical", "vertical_then_horizontal"):
+        if mode == "horizontal_then_vertical":
+            step = 1 if c1 > c0 else -1
+            for c in range(c0 + step, c1, step): cells.append((r0, c))
+            step = 1 if r1 > r0 else -1
+            for r in range(r0 + step, r1, step): cells.append((r, c1))
+        else:
+            step = 1 if r1 > r0 else -1
+            for r in range(r0 + step, r1, step): cells.append((r, c0))
+            step = 1 if c1 > c0 else -1
+            for c in range(c0 + step, c1, step): cells.append((r1, c))
+    else:
+        return None
+    return set(cells)
+
+
+def _bridge_predict(g: Grid, selector: str, path_mode: str, color_mode: str, fixed_color: int | None) -> Grid | None:
+    h, w = shape(g)
+    pairs = _selected_component_pairs(g, selector)
+    if len(pairs) != 1:
+        return None
+    a, b = pairs[0]
+    color = _comp_color(g, a) if color_mode == "first_component" else _comp_color(g, b) if color_mode == "second_component" else fixed_color
+    if color is None:
+        return None
+    paths = []
+    if path_mode == "fill_between_aligned_bboxes":
+        ba = bbox_for_positions(a); bb = bbox_for_positions(b)
+        if ba is None or bb is None: return None
+        ar0, ac0, ar1, ac1 = ba; br0, bc0, br1, bc1 = bb
+        if ar0 <= br1 and br0 <= ar1 and (ac1 < bc0 or bc1 < ac0):
+            r = max(ar0, br0); c_start, c_end = (ac1 + 1, bc0) if ac1 < bc0 else (bc1 + 1, ac0)
+            paths = [set((r, c) for c in range(c_start, c_end))]
+        elif ac0 <= bc1 and bc0 <= ac1 and (ar1 < br0 or br1 < ar0):
+            c = max(ac0, bc0); r_start, r_end = (ar1 + 1, br0) if ar1 < br0 else (br1 + 1, ar0)
+            paths = [set((r, c) for r in range(r_start, r_end))]
+    else:
+        for p, q in _nearest_cells(a, b):
+            cells = _bridge_cells_between(p, q, path_mode)
+            if cells is not None:
+                paths.append(cells)
+    uniq = []
+    for cells in paths:
+        if cells not in uniq:
+            uniq.append(cells)
+    if len(uniq) != 1:
+        return None
+    cells = uniq[0]
+    rows = _mutable(g)
+    for r, c in cells:
+        if not (0 <= r < h and 0 <= c < w) or g[r][c] != 0:
+            return None
+        rows[r][c] = color
+    return _freeze(rows)
+
+
+def fit_connect_components_by_shortest_bridge(train: Train) -> list[Rule]:
+    rules: list[Rule] = []
+    if not train or any(shape(i) != shape(o) for i, o in train):
+        return []
+    # require add-only preservation
+    for inp, out in train:
+        h, w = shape(inp)
+        if any(inp[r][c] != 0 and out[r][c] != inp[r][c] for r in range(h) for c in range(w)):
+            return []
+        if not any(inp[r][c] == 0 and out[r][c] != 0 for r in range(h) for c in range(w)):
+            return []
+    selectors = ("two_components_only", "same_color_pair", "different_color_pair", "largest_two", "nearest_pair", "unique_color_pair")
+    paths = ("horizontal_then_vertical", "vertical_then_horizontal", "straight_if_aligned", "fill_between_aligned_bboxes")
+    color_modes = ("first_component", "second_component", "fixed")
+    added_colors = sorted({out[r][c] for inp, out in train for r in range(shape(inp)[0]) for c in range(shape(inp)[1]) if inp[r][c] == 0 and out[r][c] != 0})
+    fixeds = added_colors if len(added_colors) == 1 else []
+    for sel in selectors:
+        for path in paths:
+            for cm in color_modes:
+                colors = fixeds if cm == "fixed" else [None]
+                for fc in colors:
+                    fn = lambda g, sel=sel, path=path, cm=cm, fc=fc: _bridge_predict(g, sel, path, cm, fc)
+                    if _validate(train, fn):
+                        suffix = cm if cm != "fixed" else f"fixed_{fc}"
+                        rules.append(_rule(f"gen_component_bridge_{sel}_{path}_{suffix}", fn))
+    return rules
+
+FAMILY_FITTERS["connect_components_by_shortest_bridge"] = fit_connect_components_by_shortest_bridge
+FAMILY_ALIASES["component_bridge"] = "connect_components_by_shortest_bridge"

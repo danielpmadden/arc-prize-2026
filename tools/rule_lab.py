@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from collections import Counter, defaultdict
+from itertools import combinations
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -273,7 +274,10 @@ def delta_diagnostics(inp: Grid, out: Grid) -> list[str]:
     if len(comps)==1: feats.append("one_connected_component")
     if all(len({r for r,_ in comp})==1 for comp in comps): feats.append("straight_horizontal_segments")
     if all(len({c for _,c in comp})==1 for comp in comps): feats.append("straight_vertical_segments")
-    if _periodic_positions(changed, h, w): feats.append("periodic_positions")
+    pfeats = _periodic_position_features(changed, inp, out)
+    feats.extend([f for f in ("exact_nontrivial_period", "row_arithmetic_progression", "column_arithmetic_progression", "lattice_completion", "translated_copy_pattern") if f in pfeats])
+    if not any(f in pfeats for f in ("exact_nontrivial_period", "row_arithmetic_progression", "column_arithmetic_progression", "lattice_completion", "translated_copy_pattern")) and "trivial_period_only" in pfeats:
+        feats.append("trivial_period_only")
     in_comps=[frozenset(c) for c in _components(inp)]
     if any(changed==set(c) for c in in_comps): feats.append("component_masks")
     if any(_bbox(changed)==_bbox(set(c)) for c in in_comps): feats.append("component_bounding_boxes")
@@ -296,6 +300,121 @@ def _mask_components(cells: set[tuple[int,int]]) -> list[set[tuple[int,int]]]:
     return comps
 
 
+
+def _periodic_position_features(cells: set[tuple[int,int]], inp: Grid, out: Grid) -> set[str]:
+    h,w=_shape(inp); feats=set()
+    if len(cells)<3:
+        return feats
+    rows=sorted({r for r,_ in cells}); cols=sorted({c for _,c in cells})
+    def ap(xs):
+        if len(xs)<3: return False
+        ds=[b-a for a,b in zip(xs,xs[1:])]
+        return len(set(ds))==1 and ds[0]>0
+    if ap(rows): feats.add("row_arithmetic_progression")
+    if ap(cols): feats.add("column_arithmetic_progression")
+    for pr in range(1,h):
+        if h//pr < 2: continue
+        ok=True
+        for r,c in cells:
+            rr=r+pr
+            if rr<h and (rr,c) not in cells: ok=False; break
+        if ok and any(r+pr<h for r,c in cells): feats.add("exact_nontrivial_period")
+    for pc in range(1,w):
+        if w//pc < 2: continue
+        ok=True
+        for r,c in cells:
+            cc=c+pc
+            if cc<w and (r,cc) not in cells: ok=False; break
+        if ok and any(c+pc<w for r,c in cells): feats.add("exact_nontrivial_period")
+    if len(rows)*len(cols)==len(cells) and len(rows)>1 and len(cols)>1:
+        feats.add("lattice_completion")
+    comps=_mask_components(cells)
+    sigs=[]
+    for comp in comps:
+        b=_bbox(comp)
+        if b:
+            r0,c0,_,_=b; sigs.append(frozenset((r-r0,c-c0,out[r][c]) for r,c in comp))
+    if len(sigs)!=len(set(sigs)) and len(sigs)>1:
+        feats.add("translated_copy_pattern")
+    if not feats:
+        feats.add("trivial_period_only")
+    return feats
+
+def _comp_infos(g: Grid):
+    infos=[]
+    for comp in _components(g):
+        colors=Counter(g[r][c] for r,c in comp)
+        infos.append({"cells":comp,"bbox":_bbox(comp),"size":len(comp),"colors":dict(colors)})
+    return infos
+
+def _grid_text(g: Grid)->str:
+    return "\n".join("".join(str(v) for v in row) for row in g)
+
+def _local_strip(g: Grid, rows: bool, cols: bool) -> Grid | None:
+    h,w=_shape(g)
+    sr={r for r,row in enumerate(g) if row and row[0]!=0 and all(v==row[0] for v in row)} if rows else set()
+    sc={c for c in range(w) if h and g[0][c]!=0 and all(g[r][c]==g[0][c] for r in range(h))} if cols else set()
+    out=[[v for c,v in enumerate(row) if c not in sc] for r,row in enumerate(g) if r not in sr]
+    return tuple(tuple(row) for row in out) if out and out[0] else None
+
+def _extract_candidate_kinds(inp: Grid, out: Grid):
+    kinds=[]; ih,iw=_shape(inp); oh,ow=_shape(out)
+    if oh<=ih and ow<=iw:
+        for r0 in range(ih-oh+1):
+            for c0 in range(iw-ow+1):
+                sub=tuple(tuple(inp[r][c] for c in range(c0,c0+ow)) for r in range(r0,r0+oh))
+                if sub==out: kinds.append(f"crop@({r0},{c0})")
+    for info in _comp_infos(inp):
+        b=info["bbox"]
+        if b:
+            r0,c0,r1,c1=b
+            sub=tuple(tuple(inp[r][c] for c in range(c0,c1+1)) for r in range(r0,r1+1))
+            if sub==out: kinds.append(f"component_bbox@{b}")
+    if _local_strip(inp, True, True)==out: kinds.append("separator_lines_removed")
+    if _local_strip(inp, True, False)==out: kinds.append("separator_rows_removed")
+    if _local_strip(inp, False, True)==out: kinds.append("separator_cols_removed")
+    return kinds or ["no"]
+
+def inspect_residual_task(task_id: str, challenges: dict, show_grids: bool=False) -> None:
+    if task_id not in challenges: raise SystemExit(f"Task not found: {task_id}")
+    task=challenges[task_id]
+    print(f"Task {task_id}: train_pairs={len(task.get('train', []))}")
+    for i,pair in enumerate(task.get('train', [])):
+        inp=as_grid(pair['input']); out=as_grid(pair['output']); h,w=_shape(inp); oh,ow=_shape(out)
+        print(f"\nTrain {i}: input shape={h}x{w} output shape={oh}x{ow}")
+        print(f"input palette={sorted(_palette(inp))} output palette={sorted(_palette(out))}")
+        for label,g in (("input",inp),("output",out)):
+            infos=_comp_infos(g); print(f"{label} 4-connected components={len(infos)}")
+            for j,info in enumerate(infos[:30]): print(f"  {label} comp {j}: bbox={info['bbox']} size={info['size']} colors={info['colors']}")
+        if (h,w)==(oh,ow):
+            changed={(r,c) for r in range(h) for c in range(w) if inp[r][c]!=out[r][c]}
+            added={(r,c) for r,c in changed if inp[r][c]==0 and out[r][c]!=0}; deleted={(r,c) for r,c in changed if inp[r][c]!=0 and out[r][c]==0}; recol={(r,c) for r,c in changed if inp[r][c] and out[r][c] and inp[r][c]!=out[r][c]}
+            print(f"changed count={len(changed)} added count={len(added)} deleted count={len(deleted)} recolored count={len(recol)} changed bbox={_bbox(changed)}")
+            print(f"added connected components={[{'bbox':_bbox(c),'size':len(c),'colors':dict(Counter(out[r][cc] for r,cc in c))} for c in _mask_components(added)]}")
+            in_comps=_comp_infos(inp); preserved=all(all(out[r][c]==inp[r][c] for r,c in info['cells']) for info in in_comps)
+            print(f"existing components preserved exactly={preserved}")
+            touches=[]
+            for idx,info in enumerate(in_comps):
+                n=sum(1 for r,c in added for dr,dc in ((1,0),(-1,0),(0,1),(0,-1)) if (r+dr,c+dc) in info['cells'])
+                if n: touches.append((idx,n))
+            print(f"added cells touch existing component={bool(touches)} details={touches}")
+            print(f"added cells bridge two existing components={len({i for i,n in touches if n})>=2}")
+            print(f"added cells extend rows/columns from existing cells={bool(added and (set(r for r,_ in added)&{r for info in in_comps for r,_ in info['cells']} or set(c for _,c in added)&{c for info in in_comps for _,c in info['cells']}))}")
+            if added and not deleted and not recol:
+                print(f"added cells by color={dict(Counter(out[r][c] for r,c in added))} added-component bbox={[_bbox(c) for c in _mask_components(added)]}")
+                print(f"added rows={sorted({r for r,_ in added})} added columns={sorted({c for _,c in added})}")
+                dists=[]
+                for a,b in combinations(in_comps,2): dists.append(min(abs(r-r2)+abs(c-c2) for r,c in a['cells'] for r2,c2 in b['cells']))
+                md=min(dists) if dists else None; print(f"minimum Manhattan distance between input components={md}")
+                print(f"additions form a shortest Manhattan bridge={md is not None and len(added)==max(0,md-1) and len(touches)>=2}")
+                print(f"additions form a full bbox edge={_is_rect(added) and (len({r for r,_ in added})==1 or len({c for _,c in added})==1)}")
+                print(f"additions complete a rectangle={_is_rect({(r,c) for info in in_comps for r,c in info['cells']}|added)}")
+                masks=[frozenset((r-min(x for x,_ in info['cells']),c-min(y for _,y in info['cells'])) for r,c in info['cells']) for info in in_comps]
+                am=[frozenset((r-min(x for x,_ in c),cc-min(y for _,y in c)) for r,cc in c) for c in _mask_components(added)]
+                print(f"additions repeat an existing component mask={bool(set(masks)&set(am))}")
+        print(f"output equals crop/panel/component/separator extraction={_extract_candidate_kinds(inp,out)}")
+        if show_grids:
+            print('input grid:\n'+_grid_text(inp)); print('output grid:\n'+_grid_text(out))
 def _periodic_positions(cells: set[tuple[int,int]], h: int, w: int) -> bool:
     if len(cells) < 3: return False
     for pr in range(1, min(6,h)+1):
@@ -415,11 +534,17 @@ def main() -> int:
     parser.add_argument("--signatures", action="store_true", help="Report compact signatures for production-unsolved outputs and exit.")
     parser.add_argument("--counterfactual", action="store_true", help="Estimate broad precedence risks for candidate new hits.")
     parser.add_argument("--negative-controls", action="store_true", help="Run lightweight negative-control exact-fit checks for selected family.")
+    parser.add_argument("--inspect-residual", metavar="TASK_ID", help="Print detailed residual/train-pair inspection for a task and exit.")
+    parser.add_argument("--show-grids", action="store_true", help="With --inspect-residual, include full train grids.")
     args = parser.parse_args()
 
     families = select_families(None if args.all or not args.family else args.family)
     challenges = load_json(ROOT / args.challenges)
     solutions = load_json(ROOT / args.solutions)
+
+    if args.inspect_residual:
+        inspect_residual_task(args.inspect_residual, challenges, show_grids=args.show_grids)
+        return 0
 
     items = list(challenges.items())
     if args.task:
