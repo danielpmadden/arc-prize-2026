@@ -1009,6 +1009,258 @@ def fit_periodic_tile_with_phase_crop(train: Train) -> list[Rule]:
                     rules.append(_rule(f"gen_periodic_tile_{slug}_phase_{pr}_{pc}", fn))
     return rules
 
+# Experimental family: periodic add mask completion
+
+def _same_shape_add_only(train: Train) -> bool:
+    return all(shape(i)==shape(o) and all((i[r][c]==o[r][c] or (i[r][c]==0 and o[r][c]!=0)) for r in range(shape(i)[0]) for c in range(shape(i)[1])) for i,o in train)
+
+def _complete_lattice(g: Grid, sr: int, sc: int) -> Grid | None:
+    h,w=shape(g); rows=_mutable(g)
+    for color in nonzero_colors(g):
+        pts=[(r,c) for r,row in enumerate(g) for c,v in enumerate(row) if v==color]
+        if len(pts)<2: continue
+        rs={r%sr for r,_ in pts} if sr else set(); cs={c%sc for _,c in pts} if sc else set()
+        for r in range(h):
+            for c in range(w):
+                if rows[r][c]==0 and (not sr or r%sr in rs) and (not sc or c%sc in cs): rows[r][c]=color
+    return _freeze(rows)
+
+def _full_grid_added(g: Grid, pattern: dict[tuple[int,int], int], ph: int, pw: int) -> Grid | None:
+    h,w=shape(g); rows=_mutable(g)
+    for r in range(h):
+        for c in range(w):
+            col=pattern.get((r%ph,c%pw))
+            if col and g[r][c]==0: rows[r][c]=col
+    return _freeze(rows)
+
+def _copy_component_offsets(g: Grid, dr: int, dc: int) -> Grid | None:
+    h,w=shape(g); rows=_mutable(g)
+    for comp in _components4(g):
+        for r,c in comp:
+            nr,nc=r+dr,c+dc
+            if not (0<=nr<h and 0<=nc<w): return None
+            if g[nr][nc]==0: rows[nr][nc]=g[r][c]
+    return _freeze(rows)
+
+def fit_periodic_add_mask_completion(train: Train) -> list[Rule]:
+    if not train or not _same_shape_add_only(train): return []
+    rules=[]
+    for sr in range(1,11):
+        for sc in range(1,11):
+            fn=lambda g,sr=sr,sc=sc:_complete_lattice(g,sr,sc)
+            if _validate(train,fn): rules.append(_rule(f"gen_periodic_add_complete_lattice_{sr}_{sc}",fn))
+    for ph in range(1,11):
+        for pw in range(1,11):
+            pat={}; ok=True
+            for inp,out in train:
+                h,w=shape(inp)
+                for r in range(h):
+                    for c in range(w):
+                        if inp[r][c]==0 and out[r][c]!=0:
+                            k=(r%ph,c%pw)
+                            if k in pat and pat[k]!=out[r][c]: ok=False; break
+                            pat[k]=out[r][c]
+                    if not ok: break
+                if not ok: break
+            if not pat or not ok: continue
+            fn=lambda g,pat=pat,ph=ph,pw=pw:_full_grid_added(g,pat,ph,pw)
+            if _validate(train,fn): rules.append(_rule(f"gen_periodic_add_full_grid_period_{ph}_{pw}",fn))
+    h,w=shape(train[0][0])
+    for dr in range(-min(10,h-1),min(10,h-1)+1):
+        for dc in range(-min(10,w-1),min(10,w-1)+1):
+            if dr==0 and dc==0: continue
+            fn=lambda g,dr=dr,dc=dc:_copy_component_offsets(g,dr,dc)
+            if _validate(train,fn): rules.append(_rule(f"gen_periodic_add_copy_component_offsets_{dr}_{dc}",fn))
+    return rules
+
+# Experimental family: separator component bbox extract
+
+def _strip_seps(g: Grid) -> Grid | None: return _strip(g, True, True)
+
+def _crop_largest_component(g: Grid) -> Grid | None:
+    comps=_components4(g)
+    return _crop_positions(g, max(comps,key=len)) if comps else None
+
+def fit_separator_component_bbox_extract(train: Train) -> list[Rule]:
+    rules=[]
+    specs=[("gen_sep_crop_nonzero", lambda s:_crop_positions(s, nonzero_positions(s))), ("gen_sep_crop_largest_component", _crop_largest_component), ("gen_sep_crop_components_bbox", lambda s:_crop_positions(s, [p for comp in _components4(s) for p in comp]))]
+    colors=set(range(1,10))
+    for name,op in specs:
+        fn=lambda g,op=op: (None if _strip_seps(g) is None else op(_strip_seps(g)))
+        if _validate(train,fn): rules.append(_rule(name,fn))
+    for color in colors:
+        fn=lambda g,color=color: (None if _strip_seps(g) is None else _crop_positions(_strip_seps(g), [(r,c) for r,row in enumerate(_strip_seps(g)) for c,v in enumerate(row) if v==color]))
+        if _validate(train,fn): rules.append(_rule(f"gen_sep_crop_color_{color}",fn))
+    return rules
+
+# Experimental family: recolor preserved masks by role
+
+def _role(info: dict, h:int, w:int, mode:str):
+    if mode=="touches_border": return info["r0"]==0 or info["c0"]==0 or info["r1"]==h-1 or info["c1"]==w-1
+    if mode=="inside_not_border": return not _role(info,h,w,"touches_border")
+    if mode=="is_line": return info["h"]==1 or info["w"]==1
+    if mode=="is_square_bbox": return info["h"]==info["w"]
+    if mode=="bbox_height": return info["h"]
+    if mode=="bbox_width": return info["w"]
+    if mode=="bbox_area": return info["h"]*info["w"]
+    if mode=="component_area": return info["area"]
+    cr,cc=(h-1)/2,(w-1)/2; cen=((info["r0"]+info["r1"])/2,(info["c0"]+info["c1"])/2); dist=(cen[0]-cr)**2+(cen[1]-cc)**2
+    if mode in ("nearest_to_center","farthest_from_center"): return round(dist,6)
+    if mode=="relative_quadrant": return (cen[0]>=cr, cen[1]>=cc)
+    return None
+
+def fit_recolor_preserved_masks_by_role(train: Train) -> list[Rule]:
+    modes=("touches_border","inside_not_border","is_line","is_square_bbox","bbox_height","bbox_width","bbox_area","component_area","nearest_to_center","farthest_from_center","relative_quadrant")
+    rules=[]
+    for mode in modes:
+        mapping={}; changed=False; ok=True
+        for inp,out in train:
+            if shape(inp)!=shape(out): ok=False; break
+            h,w=shape(inp)
+            for r in range(h):
+                for c in range(w):
+                    if (inp[r][c]==0)!=(out[r][c]==0): ok=False; break
+                if not ok: break
+            if not ok: break
+            infos=[_comp_info(inp,c) for c in _components4(inp)]
+            if mode=="nearest_to_center": vals=[_role(x,h,w,mode) for x in infos]; mark=min(vals) if vals else None
+            elif mode=="farthest_from_center": vals=[_role(x,h,w,mode) for x in infos]; mark=max(vals) if vals else None
+            else: mark=None
+            for info in infos:
+                rv=(mark==_role(info,h,w,mode)) if mode in ("nearest_to_center","farthest_from_center") else _role(info,h,w,mode)
+                cols={out[r][c] for r,c in info["cells"]}
+                if len(cols)!=1 or 0 in cols: ok=False; break
+                col=next(iter(cols))
+                if rv in mapping and mapping[rv]!=col: ok=False; break
+                mapping[rv]=col; changed |= any(inp[r][c]!=col for r,c in info["cells"])
+            if not ok: break
+        if not ok or not changed: continue
+        def fn(g:Grid,mode=mode,mapping=mapping):
+            h,w=shape(g); rows=_mutable(g); infos=[_comp_info(g,c) for c in _components4(g)]
+            mark=None
+            if mode in ("nearest_to_center","farthest_from_center") and infos:
+                vals=[_role(x,h,w,mode) for x in infos]; mark=min(vals) if mode.startswith("nearest") else max(vals)
+            for info in infos:
+                rv=(mark==_role(info,h,w,mode)) if mode in ("nearest_to_center","farthest_from_center") else _role(info,h,w,mode)
+                if rv in mapping:
+                    for r,c in info["cells"]: rows[r][c]=mapping[rv]
+            return _freeze(rows)
+        if _validate(train,fn): rules.append(_rule(f"gen_recolor_components_by_role_{mode}",fn))
+    return rules
+
+# Experimental family: component move or copy by offset
+
+def _selected_components(g: Grid, selector: str) -> list[list[tuple[int,int]]]:
+    comps=_components4(g); infos=[_comp_info(g,c) for c in comps]
+    if selector.startswith("color_"):
+        col=int(selector.split("_",1)[1]); return [x["cells"] for x in infos if g[x["cells"][0][0]][x["cells"][0][1]]==col]
+    if selector.startswith("size_"):
+        n=int(selector.split("_",1)[1]); return [x["cells"] for x in infos if x["area"]==n]
+    if selector=="largest": return [max(comps,key=len)] if comps else []
+    if selector=="smallest": return [min(comps,key=len)] if comps else []
+    if selector=="singleton": return [c for c in comps if len(c)==1]
+    if selector.startswith("rank_left_to_right_"):
+        k=int(selector.rsplit("_",1)[1]); s=_sort_infos(infos,"left_to_right"); return [s[k]["cells"]] if k<len(s) else []
+    if selector.startswith("rank_top_to_bottom_"):
+        k=int(selector.rsplit("_",1)[1]); s=_sort_infos(infos,"top_to_bottom"); return [s[k]["cells"]] if k<len(s) else []
+    return []
+
+def _move_copy_components(g: Grid, selector: str, dr:int, dc:int, copy:bool) -> Grid | None:
+    h,w=shape(g); comps=_selected_components(g,selector)
+    if not comps: return None
+    rows=_mutable(g); src={p for comp in comps for p in comp}; writes=[]
+    for comp in comps:
+        for r,c in comp:
+            nr,nc=r+dr,c+dc
+            if not (0<=nr<h and 0<=nc<w): return None
+            if g[nr][nc]!=0 and (nr,nc) not in src and g[nr][nc]!=g[r][c]: return None
+            writes.append((nr,nc,g[r][c]))
+    if not copy:
+        for r,c in src: rows[r][c]=0
+    for r,c,v in writes: rows[r][c]=v
+    return _freeze(rows)
+
+def fit_component_move_or_copy_by_offset(train: Train) -> list[Rule]:
+    if not train or any(shape(i)!=shape(o) for i,o in train): return []
+    base_selectors={"largest","smallest","singleton"}; offsets:set[tuple[int,int]]=set()
+    for inp,out in train:
+        infos=[_comp_info(inp,c) for c in _components4(inp)]
+        out_infos=[_comp_info(out,c) for c in _components4(out)]
+        for a in infos:
+            ca=inp[a["cells"][0][0]][a["cells"][0][1]]
+            for b in out_infos:
+                cb=out[b["cells"][0][0]][b["cells"][0][1]]
+                if ca==cb and a["area"]==b["area"]:
+                    dr,dc=b["r0"]-a["r0"],b["c0"]-a["c0"]
+                    if (dr or dc) and abs(dr)<=10 and abs(dc)<=10: offsets.add((dr,dc))
+    rules=[]
+    for mode,copy in (("move_one_component_by_offset",False),("copy_one_component_by_offset",True),("move_all_components_by_offset",False),("copy_all_components_by_offset",True)):
+        for sel in sorted(base_selectors):
+            for dr,dc in sorted(offsets):
+                fn=lambda g,sel=sel,dr=dr,dc=dc,copy=copy:_move_copy_components(g,sel,dr,dc,copy)
+                if _validate(train,fn): rules.append(_rule(f"gen_{mode}_{sel}_offset_{dr}_{dc}",fn))
+    return rules
+
+
+# Experimental family: bounded hole and region fill variants
+
+def _zero_regions(g: Grid) -> list[list[tuple[int,int]]]:
+    h,w=shape(g); seen=set(); regs=[]
+    for r in range(h):
+        for c in range(w):
+            if g[r][c]!=0 or (r,c) in seen: continue
+            st=[(r,c)]; seen.add((r,c)); comp=[]
+            while st:
+                rr,cc=st.pop(); comp.append((rr,cc))
+                for dr,dc in ((1,0),(-1,0),(0,1),(0,-1)):
+                    nr,nc=rr+dr,cc+dc
+                    if 0<=nr<h and 0<=nc<w and g[nr][nc]==0 and (nr,nc) not in seen: seen.add((nr,nc)); st.append((nr,nc))
+            regs.append(comp)
+    return regs
+
+def _enclosed_region_color(g: Grid, reg:list[tuple[int,int]]) -> int | None:
+    h,w=shape(g)
+    if any(r in (0,h-1) or c in (0,w-1) for r,c in reg): return None
+    neigh=set()
+    s=set(reg)
+    for r,c in reg:
+        for dr,dc in ((1,0),(-1,0),(0,1),(0,-1)):
+            p=(r+dr,c+dc)
+            if p not in s and g[p[0]][p[1]]!=0: neigh.add(g[p[0]][p[1]])
+    return next(iter(neigh)) if len(neigh)==1 else None
+
+def _fill_holes(g: Grid, mode:str, color:int|None=None, n:int|None=None) -> Grid | None:
+    rows=_mutable(g)
+    if mode=="bbox":
+        for comp in _components4(g):
+            b=bbox_for_positions(comp)
+            if b:
+                r0,c0,r1,c1=b; col=g[comp[0][0]][comp[0][1]]
+                for r in range(r0,r1+1):
+                    for c in range(c0,c1+1):
+                        if g[r][c]==0: rows[r][c]=col
+    else:
+        for reg in _zero_regions(g):
+            col = _enclosed_region_color(g,reg) if mode=="enclosing" else color
+            if mode=="size" and (n is None or len(reg)>n): continue
+            if mode=="size": col=_enclosed_region_color(g,reg)
+            if col:
+                for r,c in reg: rows[r][c]=col
+    return _freeze(rows)
+
+def fit_bounded_hole_and_region_fill_variants(train: Train) -> list[Rule]:
+    if not train or not _same_shape_add_only(train): return []
+    rules=[]
+    for name,fn in [("gen_fill_holes_enclosing_color",lambda g:_fill_holes(g,"enclosing")), ("gen_fill_inside_component_bbox",lambda g:_fill_holes(g,"bbox"))]:
+        if _validate(train,fn): rules.append(_rule(name,fn))
+    for color in range(1,10):
+        fn=lambda g,color=color:_fill_holes(g,"learned",color=color)
+        if _validate(train,fn): rules.append(_rule(f"gen_fill_holes_learned_color_{color}",fn))
+    for n in range(1,21):
+        fn=lambda g,n=n:_fill_holes(g,"size",n=n)
+        if _validate(train,fn): rules.append(_rule(f"gen_fill_holes_size_le_{n}",fn))
+    return rules
+
 
 FAMILY_FITTERS = {
     "align_bbox_to_edge": fit_align_bbox_to_edge,
@@ -1035,6 +1287,11 @@ FAMILY_FITTERS = {
     "split_panel_boolean_operation": fit_split_panel_boolean_operation,
     "recolor_bars_by_order": fit_recolor_bars_by_order,
     "recolor_components_by_rank": fit_recolor_components_by_rank,
+    "periodic_add_mask_completion": fit_periodic_add_mask_completion,
+    "separator_component_bbox_extract": fit_separator_component_bbox_extract,
+    "recolor_preserved_masks_by_role": fit_recolor_preserved_masks_by_role,
+    "component_move_or_copy_by_offset": fit_component_move_or_copy_by_offset,
+    "bounded_hole_and_region_fill_variants": fit_bounded_hole_and_region_fill_variants,
 }
 
 FAMILY_ALIASES = {
@@ -1069,4 +1326,10 @@ FAMILY_ALIASES = {
     "extend_rays_to_marker_or_boundary": "extend_rays_to_marker_or_boundary",
     "periodic": "periodic_tile_with_phase_crop",
     "periodic_tile_with_phase_crop": "periodic_tile_with_phase_crop",
+    "periodic_add": "periodic_add_mask_completion",
+    "sep_bbox": "separator_component_bbox_extract",
+    "role_recolor": "recolor_preserved_masks_by_role",
+    "component_move": "component_move_or_copy_by_offset",
+    "component_copy": "component_move_or_copy_by_offset",
+    "hole_fill": "bounded_hole_and_region_fill_variants",
 }
