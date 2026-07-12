@@ -87,6 +87,57 @@ def fit_split_intersection_bar(train: list[tuple[Grid, Grid]]) -> list[Rule]:
 
     return [Rule("split_intersection_bar", 16, predict)]
 
+
+def fit_connect_same_color_pairs(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def predict(g: Grid) -> Grid:
+        rows = [list(row) for row in g]
+        for color in nonzero_colors(g):
+            pts = [(r, c) for r, row in enumerate(g) for c, v in enumerate(row) if v == color]
+            if len(pts) != 2:
+                continue
+            (r0, c0), (r1, c1) = pts
+            if r0 == r1:
+                for c in range(min(c0, c1), max(c0, c1) + 1):
+                    rows[r0][c] = color
+            elif c0 == c1:
+                for r in range(min(r0, r1), max(r0, r1) + 1):
+                    rows[r][c0] = color
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("connect_same_color_pairs", 17, predict)]
+
+
+def fit_dilate_8_added_color_1(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def predict(g: Grid) -> Grid:
+        h, w = shape(g)
+        rows = [list(row) for row in g]
+        for r, row in enumerate(g):
+            for c, v in enumerate(row):
+                if v == 0:
+                    continue
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < h and 0 <= nc < w and g[nr][nc] == 0:
+                            rows[nr][nc] = 1
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("dilate_8_added_color_1", 20, predict)]
+
 def fit_fill_enclosed_regions(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     learned_fill_color: Optional[int] = None
 
