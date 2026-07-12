@@ -5,7 +5,7 @@ from typing import Optional
 
 from src.arc_solver.types import Grid, Rule
 from src.arc_solver.grid_utils import (
-    as_grid, bbox_for_positions, colors, constant_grid, crop_rect, most_common_color,
+    as_grid, bbox_for_positions, colors, constant_grid, crop_rect, is_valid_grid, most_common_color,
     nonzero_colors, nonzero_positions, positions_of, shape,
 )
 from src.arc_solver.transforms import infer_color_map, apply_color_map, rot90, rot270, transpose
@@ -506,6 +506,274 @@ def fit_recolor_components_by_size(train: list[tuple[Grid, Grid]]) -> list[Rule]
 
     return [Rule("recolor_components_by_size", 16, predict)]
 
+
+
+def _components4_same_color(g: Grid) -> list[list[tuple[int, int]]]:
+    h, w = shape(g)
+    seen: set[tuple[int, int]] = set()
+    comps: list[list[tuple[int, int]]] = []
+
+    for r in range(h):
+        for c in range(w):
+            if g[r][c] == 0 or (r, c) in seen:
+                continue
+
+            color = g[r][c]
+            stack = [(r, c)]
+            comp: list[tuple[int, int]] = []
+
+            while stack:
+                rr, cc = stack.pop()
+                if (rr, cc) in seen:
+                    continue
+                if not (0 <= rr < h and 0 <= cc < w):
+                    continue
+                if g[rr][cc] != color:
+                    continue
+
+                seen.add((rr, cc))
+                comp.append((rr, cc))
+                stack.append((rr - 1, cc))
+                stack.append((rr + 1, cc))
+                stack.append((rr, cc - 1))
+                stack.append((rr, cc + 1))
+
+            comps.append(comp)
+
+    return comps
+
+
+def fit_recolor_components_by_rank(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def comp_info(comp: list[tuple[int, int]]) -> dict:
+        rs = [r for r, _ in comp]
+        cs = [c for _, c in comp]
+        return {
+            "cells": comp,
+            "r0": min(rs), "c0": min(cs),
+            "r1": max(rs), "c1": max(cs),
+            "area": len(comp),
+            "h": max(rs) - min(rs) + 1,
+            "w": max(cs) - min(cs) + 1,
+        }
+
+    def sort_infos(infos: list[dict], mode: str) -> list[dict]:
+        reverse = mode.endswith("descending") or mode in ("right_to_left", "bottom_to_top")
+        if mode.startswith("area_"):
+            key = lambda x: (x["area"], x["r0"], x["c0"])
+        elif mode.startswith("height_"):
+            key = lambda x: (x["h"], x["r0"], x["c0"])
+        elif mode.startswith("width_"):
+            key = lambda x: (x["w"], x["r0"], x["c0"])
+        elif mode in ("left_to_right", "right_to_left"):
+            key = lambda x: (x["c0"], x["r0"], x["area"])
+        else:
+            key = lambda x: (x["r0"], x["c0"], x["area"])
+        return sorted(infos, key=key, reverse=reverse)
+
+    def apply_rule(g: Grid, mode: str, mapping: dict[int, int]) -> Grid:
+        infos = [comp_info(comp) for comp in _components4_same_color(g)]
+        rows = [list(row) for row in g]
+        for idx, info in enumerate(sort_infos(infos, mode)):
+            if idx not in mapping:
+                continue
+            for r, c in info["cells"]:
+                rows[r][c] = mapping[idx]
+        return as_grid(rows)
+
+    modes = (
+        "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top",
+        "area_ascending", "area_descending", "height_ascending", "height_descending",
+        "width_ascending", "width_descending",
+    )
+    rules: list[Rule] = []
+
+    for mode in modes:
+        mapping: dict[int, int] = {}
+        changed = False
+        ok = True
+
+        for inp, out in train:
+            if shape(inp) != shape(out):
+                ok = False
+                break
+            for r, row in enumerate(inp):
+                for c, v in enumerate(row):
+                    if v == 0 and out[r][c] != 0:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if not ok:
+                break
+
+            infos = [comp_info(comp) for comp in _components4_same_color(inp)]
+            for idx, info in enumerate(sort_infos(infos, mode)):
+                vals = {out[r][c] for r, c in info["cells"]}
+                if len(vals) != 1 or 0 in vals:
+                    ok = False
+                    break
+                out_color = next(iter(vals))
+                if idx in mapping and mapping[idx] != out_color:
+                    ok = False
+                    break
+                mapping[idx] = out_color
+                if any(inp[r][c] != out_color for r, c in info["cells"]):
+                    changed = True
+            if not ok or apply_rule(inp, mode, mapping) != out:
+                ok = False
+                break
+
+        if not ok or not changed:
+            continue
+
+        learned = dict(mapping)
+        def predict(g: Grid, mode=mode, mapping=learned) -> Grid:
+            return apply_rule(g, mode, mapping)
+
+        rules.append(Rule(f"recolor_components_by_rank_{mode}", 16, predict))
+
+    return rules
+
+
+def fit_periodic_tile_with_phase_crop(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def tile_source(g: Grid, source_mode: str) -> Optional[Grid]:
+        if source_mode == "full_input":
+            return g if shape(g)[0] and shape(g)[1] else None
+        if source_mode == "nonzero_bbox":
+            pos = nonzero_positions(g)
+        else:
+            if source_mode == "bg_zero":
+                bg = 0
+            elif source_mode == "bg_most_common":
+                bg = most_common_color(g)
+            elif source_mode == "bg_corner":
+                bg = g[0][0]
+            else:
+                return None
+            pos = {(r, c) for r, row in enumerate(g) for c, value in enumerate(row) if value != bg}
+        box = bbox_for_positions(pos)
+        return crop_rect(g, box) if box is not None else None
+
+    def periodic(tile: Grid, oh: int, ow: int, phase_r: int, phase_c: int) -> Optional[Grid]:
+        th, tw = shape(tile)
+        if th <= 0 or tw <= 0 or oh <= 0 or ow <= 0:
+            return None
+        return tuple(tuple(tile[(r + phase_r) % th][(c + phase_c) % tw] for c in range(ow)) for r in range(oh))
+
+    def infer_output_shape(g: Grid) -> Optional[tuple[int, int]]:
+        out_shapes = [shape(out) for _, out in train]
+        if len(set(out_shapes)) == 1:
+            return out_shapes[0]
+
+        deltas = [(shape(out)[0] - shape(inp)[0], shape(out)[1] - shape(inp)[1]) for inp, out in train]
+        if len(set(deltas)) == 1:
+            h, w = shape(g)
+            dh, dw = deltas[0]
+            return h + dh, w + dw
+
+        ratios: list[tuple[int, int]] = []
+        for inp, out in train:
+            ih, iw = shape(inp)
+            oh, ow = shape(out)
+            if ih == 0 or iw == 0 or oh % ih != 0 or ow % iw != 0:
+                return None
+            ratios.append((oh // ih, ow // iw))
+        if len(set(ratios)) == 1:
+            h, w = shape(g)
+            rh, rw = ratios[0]
+            return h * rh, w * rw
+        return None
+
+    if infer_output_shape(train[0][0]) is None:
+        return []
+
+    source_modes = ("full_input", "nonzero_bbox", "bg_zero", "bg_most_common", "bg_corner")
+    rules: list[Rule] = []
+    for source_mode in source_modes:
+        first_tile = tile_source(train[0][0], source_mode)
+        if first_tile is None:
+            continue
+        th0, tw0 = shape(first_tile)
+        for phase_r in range(th0):
+            for phase_c in range(tw0):
+                ok = True
+                for inp, out in train:
+                    tile = tile_source(inp, source_mode)
+                    if not is_valid_grid(tile):
+                        ok = False
+                        break
+                    th, tw = shape(tile)  # type: ignore[arg-type]
+                    if phase_r >= th or phase_c >= tw:
+                        ok = False
+                        break
+                    oh, ow = shape(out)
+                    if periodic(tile, oh, ow, phase_r, phase_c) != out:  # type: ignore[arg-type]
+                        ok = False
+                        break
+                if not ok:
+                    continue
+
+                def predict(g: Grid, source_mode=source_mode, phase_r=phase_r, phase_c=phase_c) -> Optional[Grid]:
+                    tile = tile_source(g, source_mode)
+                    if not is_valid_grid(tile):
+                        return None
+                    out_shape = infer_output_shape(g)
+                    if out_shape is None:
+                        return None
+                    oh, ow = out_shape
+                    return periodic(tile, oh, ow, phase_r, phase_c)  # type: ignore[arg-type]
+
+                rules.append(Rule(f"periodic_tile_{source_mode}_phase_{phase_r}_{phase_c}", 14, predict))
+
+    return rules
+
+
+def fit_extend_ray_singletons_down(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def extend(g: Grid, stop_mode: str) -> Grid:
+        h, w = shape(g)
+        rows = [list(row) for row in g]
+        color_counts = colors(g)
+        seeds = [(r, c) for r, row in enumerate(g) for c, v in enumerate(row) if v != 0 and color_counts[v] == 1]
+
+        for r, c in seeds:
+            color = g[r][c]
+            nr = r + 1
+            while nr < h:
+                v = g[nr][c]
+                if stop_mode == "until_blocked" and v != 0:
+                    break
+                if stop_mode == "until_same_color" and v == color:
+                    break
+                if stop_mode == "until_different_nonzero" and v != 0 and v != color:
+                    break
+                if v == 0:
+                    rows[nr][c] = color
+                nr += 1
+        return as_grid(rows)
+
+    rules: list[Rule] = []
+    for stop_mode in ("to_boundary", "until_blocked", "until_different_nonzero", "until_same_color"):
+        ok = True
+        changed = False
+        for inp, out in train:
+            if shape(inp) != shape(out):
+                ok = False
+                break
+            pred = extend(inp, stop_mode)
+            if pred != out:
+                ok = False
+                break
+            if pred != inp:
+                changed = True
+        if not ok or not changed:
+            continue
+
+        def predict(g: Grid, stop_mode=stop_mode) -> Grid:
+            return extend(g, stop_mode)
+
+        rules.append(Rule(f"extend_ray_singletons_down_{stop_mode}", 18, predict))
+
+    return rules
 
 def fit_overlay_two_panels_or(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     def full_separator_cols(g: Grid) -> list[int]:
