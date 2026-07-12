@@ -363,6 +363,151 @@ def fit_fill_rectangles_by_size(train: list[tuple[Grid, Grid]]) -> list[Rule]:
 
     return [Rule("fill_rectangles_by_size", 13, predict)]
 
+
+
+def fit_recolor_components_by_size(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    size_to_color: dict[int, int] = {}
+    changed = False
+
+    def components4(g: Grid) -> list[list[tuple[int, int]]]:
+        h, w = shape(g)
+        seen: set[tuple[int, int]] = set()
+        comps: list[list[tuple[int, int]]] = []
+
+        for r in range(h):
+            for c in range(w):
+                if g[r][c] == 0 or (r, c) in seen:
+                    continue
+
+                color = g[r][c]
+                stack = [(r, c)]
+                comp: list[tuple[int, int]] = []
+
+                while stack:
+                    rr, cc = stack.pop()
+
+                    if (rr, cc) in seen:
+                        continue
+
+                    if not (0 <= rr < h and 0 <= cc < w):
+                        continue
+
+                    if g[rr][cc] != color:
+                        continue
+
+                    seen.add((rr, cc))
+                    comp.append((rr, cc))
+                    stack.append((rr - 1, cc))
+                    stack.append((rr + 1, cc))
+                    stack.append((rr, cc - 1))
+                    stack.append((rr, cc + 1))
+
+                comps.append(comp)
+
+        return comps
+
+    def apply_rule(g: Grid, mapping: dict[int, int]) -> Grid:
+        rows = [list(row) for row in g]
+
+        for comp in components4(g):
+            size = len(comp)
+            if size not in mapping:
+                continue
+
+            out_color = mapping[size]
+            for r, c in comp:
+                rows[r][c] = out_color
+
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+
+        for comp in components4(inp):
+            out_colors = {out[r][c] for r, c in comp}
+            if len(out_colors) != 1:
+                return []
+
+            out_color = next(iter(out_colors))
+            if out_color == 0:
+                return []
+
+            in_colors = {inp[r][c] for r, c in comp}
+            if len(in_colors) != 1:
+                return []
+
+            if out_color == next(iter(in_colors)):
+                continue
+
+            size = len(comp)
+            if size in size_to_color and size_to_color[size] != out_color:
+                return []
+
+            size_to_color[size] = out_color
+            changed = True
+
+        if apply_rule(inp, size_to_color) != out:
+            return []
+
+    if not changed:
+        return []
+
+    def predict(g: Grid, mapping=size_to_color) -> Grid:
+        return apply_rule(g, mapping)
+
+    return [Rule("recolor_components_by_size", 16, predict)]
+
+
+def fit_overlay_two_panels_or(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def full_separator_cols(g: Grid) -> list[int]:
+        h, w = shape(g)
+        return [c for c in range(w) if h and g[0][c] != 0 and all(g[r][c] == g[0][c] for r in range(h))]
+
+    def full_separator_rows(g: Grid) -> list[int]:
+        h, _ = shape(g)
+        return [r for r in range(h) if g[r] and g[r][0] != 0 and all(v == g[r][0] for v in g[r])]
+
+    def overlay_panels(g: Grid, axis: str) -> Optional[Grid]:
+        h, w = shape(g)
+
+        if axis == "col":
+            seps = full_separator_cols(g)
+            if len(seps) != 1:
+                return None
+            sep = seps[0]
+            if sep * 2 + 1 != w:
+                return None
+            left = tuple(tuple(g[r][c] for c in range(sep)) for r in range(h))
+            right = tuple(tuple(g[r][c] for c in range(sep + 1, w)) for r in range(h))
+            p_h, p_w = shape(left)
+        else:
+            seps = full_separator_rows(g)
+            if len(seps) != 1:
+                return None
+            sep = seps[0]
+            if sep * 2 + 1 != h:
+                return None
+            left = tuple(tuple(g[r][c] for c in range(w)) for r in range(sep))
+            right = tuple(tuple(g[r][c] for c in range(w)) for r in range(sep + 1, h))
+            p_h, p_w = shape(left)
+
+        if shape(left) != shape(right):
+            return None
+
+        return tuple(
+            tuple(left[r][c] if left[r][c] != 0 else right[r][c] for c in range(p_w))
+            for r in range(p_h)
+        )
+
+    rules: list[Rule] = []
+    for axis in ("col", "row"):
+        if all(overlay_panels(inp, axis) == out for inp, out in train):
+            name = f"overlay_two_panels_or_{axis}"
+            rules.append(Rule(name, 15, lambda g, axis=axis: overlay_panels(g, axis)))
+
+    return rules
+
 def fit_extend_vertical_period(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     learned_in_color: Optional[int] = None
     learned_out_color: Optional[int] = None
