@@ -568,6 +568,220 @@ def fit_extend_lines_until_blocked(train: Train) -> list[Rule]:
     return [_rule(name, fn) for name, mode in specs for fn in [lambda g, mode=mode: _extend_lines(g, mode)] if _validate(train, fn)]
 
 
+# Shared helpers for experimental meta-families
+
+def _learn_color_map_for_pairs(pred_out_pairs: list[tuple[Grid, Grid]]) -> dict[int, int] | None:
+    mapping: dict[int, int] = {}
+    for pred, out in pred_out_pairs:
+        if not is_valid_grid(pred) or shape(pred) != shape(out):
+            return None
+        for r, row in enumerate(pred):
+            for c, src in enumerate(row):
+                dst = out[r][c]
+                if src in mapping and mapping[src] != dst:
+                    return None
+                mapping[src] = dst
+    return mapping
+
+
+def _apply_color_map(g: Grid, mapping: dict[int, int]) -> Grid | None:
+    return tuple(tuple(mapping.get(v, v) for v in row) for row in g)
+
+
+def _d4(g: Grid, op: str) -> Grid | None:
+    h, w = shape(g)
+    if h == 0 or w == 0:
+        return None
+    if op == "identity":
+        return g
+    if op == "rot90":
+        return tuple(tuple(g[h - 1 - r][c] for r in range(h)) for c in range(w))
+    if op == "rot180":
+        return tuple(tuple(g[h - 1 - r][w - 1 - c] for c in range(w)) for r in range(h))
+    if op == "rot270":
+        return tuple(tuple(g[r][w - 1 - c] for r in range(h)) for c in range(w))
+    if op == "flip_h":
+        return tuple(tuple(row[w - 1 - c] for c in range(w)) for row in g)
+    if op == "flip_v":
+        return tuple(tuple(g[h - 1 - r][c] for c in range(w)) for r in range(h))
+    if op == "transpose":
+        return tuple(tuple(g[r][c] for r in range(h)) for c in range(w))
+    if op == "anti_transpose":
+        return tuple(tuple(g[h - 1 - r][w - 1 - c] for r in range(h)) for c in range(w))
+    return None
+
+
+_D4_INVERSE = {
+    "identity": "identity",
+    "rot90": "rot270",
+    "rot180": "rot180",
+    "rot270": "rot90",
+    "flip_h": "flip_h",
+    "flip_v": "flip_v",
+    "transpose": "transpose",
+    "anti_transpose": "anti_transpose",
+}
+
+
+_D4_BASE_FAMILIES = (
+    "connect_same_color_pairs",
+    "dilate_nonzero",
+    "remove_small_components",
+    "recolor_components_by_size",
+    "crop_to_nonzero_bbox",
+    "strip_separator_lines",
+    "select_panel_by_index",
+    "overlay_two_panels",
+    "mirror_copy_nonzero",
+    "extend_lines_until_blocked",
+)
+
+
+def fit_d4_conjugated_existing(train: Train) -> list[Rule]:
+    rules: list[Rule] = []
+    seen: set[str] = set()
+    for op in _D4_INVERSE:
+        try:
+            transformed = []
+            for inp, out in train:
+                tinp = _d4(inp, op)
+                tout = _d4(out, op)
+                if tinp is None or tout is None:
+                    transformed = []
+                    break
+                transformed.append((tinp, tout))
+            if not transformed:
+                continue
+            for family in _D4_BASE_FAMILIES:
+                fitter = FAMILY_FITTERS.get(family)
+                if fitter is None or fitter is fit_d4_conjugated_existing:
+                    continue
+                try:
+                    base_rules = fitter(transformed)
+                except Exception:
+                    continue
+                for base_rule in base_rules:
+                    name = f"gen_d4_{op}__{family}__{base_rule.name}"
+                    if name in seen:
+                        continue
+                    inv_op = _D4_INVERSE[op]
+                    def fn(g: Grid, op=op, inv_op=inv_op, base_rule=base_rule) -> Grid | None:
+                        tg = _d4(g, op)
+                        if tg is None:
+                            return None
+                        pred = base_rule.predict(tg)
+                        if not is_valid_grid(pred):
+                            return None
+                        return _d4(pred, inv_op)  # type: ignore[arg-type]
+                    if _validate(train, fn):
+                        rules.append(_rule(name, fn))
+                        seen.add(name)
+        except Exception:
+            continue
+    return rules
+
+
+_STRUCTURE_COLOR_BASE_FAMILIES = (
+    "crop_to_nonzero_bbox",
+    "pad_input_to_output",
+    "repeat_input_tile",
+    "overlay_two_panels",
+    "select_panel_by_index",
+    "strip_separator_lines",
+    "mirror_copy_nonzero",
+    "extend_lines_until_blocked",
+)
+
+
+def fit_structure_then_color_map(train: Train) -> list[Rule]:
+    rules: list[Rule] = []
+    seen_outputs: set[tuple[Grid, ...]] = set()
+    for family in _STRUCTURE_COLOR_BASE_FAMILIES:
+        fitter = FAMILY_FITTERS.get(family)
+        if fitter is None:
+            continue
+        try:
+            base_rules = fitter(train)
+        except Exception:
+            continue
+        for base_rule in base_rules:
+            try:
+                preds = [(base_rule.predict(inp), out) for inp, out in train]
+                if all(pred == out for pred, out in preds):
+                    # Exact candidates are already represented by their base family.
+                    continue
+                mapping = _learn_color_map_for_pairs(preds)  # type: ignore[arg-type]
+                if mapping is None:
+                    continue
+                def fn(g: Grid, base_rule=base_rule, mapping=mapping) -> Grid | None:
+                    pred = base_rule.predict(g)
+                    if not is_valid_grid(pred):
+                        return None
+                    return _apply_color_map(pred, mapping)  # type: ignore[arg-type]
+                if not _validate(train, fn):
+                    continue
+                train_sig = tuple(fn(inp) for inp, _ in train)
+                if train_sig in seen_outputs:
+                    continue
+                seen_outputs.add(train_sig)
+                rules.append(_rule(f"gen_structure_then_color_map__{family}__{base_rule.name}", fn))
+            except Exception:
+                continue
+    return rules
+
+
+def _background_color(g: Grid, mode: str) -> int | None:
+    h, w = shape(g)
+    vals = [v for row in g for v in row]
+    if not vals:
+        return None
+    if mode == "zero":
+        return 0
+    if mode == "most_common":
+        return max(sorted(set(vals)), key=lambda v: (vals.count(v), -v))
+    if mode == "corner":
+        corners = [g[0][0], g[0][w - 1], g[h - 1][0], g[h - 1][w - 1]]
+        return max(sorted(set(corners)), key=lambda v: (corners.count(v), -v))
+    if mode == "border_most_common":
+        border = []
+        for r in range(h):
+            for c in range(w):
+                if r in (0, h - 1) or c in (0, w - 1):
+                    border.append(g[r][c])
+        return max(sorted(set(border)), key=lambda v: (border.count(v), -v)) if border else None
+    return None
+
+
+def _crop_non_bg_bbox(g: Grid, mode: str) -> Grid | None:
+    bg = _background_color(g, mode)
+    if bg is None:
+        return None
+    pos = [(r, c) for r, row in enumerate(g) for c, v in enumerate(row) if v != bg]
+    if not pos:
+        return None
+    return _crop_positions(g, pos)
+
+
+def fit_crop_to_background_bbox(train: Train) -> list[Rule]:
+    specs = [("zero", "zero"), ("most_common", "most_common"), ("corner", "corner"), ("border_most_common", "border_most_common")]
+    rules: list[Rule] = []
+    for slug, mode in specs:
+        fn = lambda g, mode=mode: _crop_non_bg_bbox(g, mode)
+        if _validate(train, fn):
+            rules.append(_rule(f"gen_crop_non_bg_bbox_{slug}", fn))
+        try:
+            pairs = [(fn(inp), out) for inp, out in train]
+            mapping = _learn_color_map_for_pairs(pairs)  # type: ignore[arg-type]
+            if mapping is None:
+                continue
+            cmap_fn = lambda g, mode=mode, mapping=mapping: (None if _crop_non_bg_bbox(g, mode) is None else _apply_color_map(_crop_non_bg_bbox(g, mode), mapping))
+            if _validate(train, cmap_fn):
+                rules.append(_rule(f"gen_crop_non_bg_bbox_{slug}_color_map", cmap_fn))
+        except Exception:
+            continue
+    return rules
+
+
 FAMILY_FITTERS = {
     "align_bbox_to_edge": fit_align_bbox_to_edge,
     "translate_color_preserve_rest": fit_translate_color_preserve_rest,
@@ -585,6 +799,9 @@ FAMILY_FITTERS = {
     "replace_color": fit_replace_color,
     "mirror_copy_nonzero": fit_mirror_copy_nonzero,
     "extend_lines_until_blocked": fit_extend_lines_until_blocked,
+    "d4_conjugated_existing": fit_d4_conjugated_existing,
+    "structure_then_color_map": fit_structure_then_color_map,
+    "crop_to_background_bbox": fit_crop_to_background_bbox,
 }
 
 FAMILY_ALIASES = {
@@ -605,4 +822,7 @@ FAMILY_ALIASES = {
     "replace": "replace_color",
     "mirror": "mirror_copy_nonzero",
     "extend_lines": "extend_lines_until_blocked",
+    "d4": "d4_conjugated_existing",
+    "structure_color": "structure_then_color_map",
+    "crop_bg": "crop_to_background_bbox",
 }

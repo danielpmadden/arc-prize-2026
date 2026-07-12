@@ -140,11 +140,12 @@ def main() -> int:
     if args.only_new_hits:
         rows = [r for r in rows if r.new > 0]
 
-    print(f"{'Family':30} {'Rule Name':55} {'Hits':>5} {'New':>4} {'Overlap':>7}  Tasks")
+    print("Family | Rule Name | Hits | New | Overlap | Tasks")
+    print("--- | --- | ---: | ---: | ---: | ---")
     for r in rows:
         task_list = ", ".join(sorted(r.tasks)) if r.tasks else "-"
         err = f" errors={r.errors}" if r.errors else ""
-        print(f"{r.family:30} {r.name:55} {r.hits:5d} {r.new:4d} {r.overlap:7d}  {task_list}{err}")
+        print(f"{r.family} | {r.name} | {r.hits} | {r.new} | {r.overlap} | {task_list}{err}")
 
     candidate_total = sum(r.hits for r in stats.values())
     candidate_new = sum(r.new for r in stats.values())
