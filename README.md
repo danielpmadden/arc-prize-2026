@@ -11,7 +11,7 @@ Training score: **49/1076 = 4.554%**.
 ## Repository Layout
 
 ```text
-arc_solver.py        # Root CLI entry point
+arc_solver.py       # Root CLI entry point
 src/arc_solver/     # Production solver package
 checkpoints/        # Solver snapshots for known milestones
 tools/rule_lab.py   # Experimental rule-candidate evaluator
