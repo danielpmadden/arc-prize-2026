@@ -26,6 +26,9 @@ class CandidateStats:
     overlap: int = 0
     tasks: set[str] = field(default_factory=set)
     errors: int = 0
+    loo: dict[str, str] = field(default_factory=dict)
+    support: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
+    residuals: dict[str, str] = field(default_factory=dict)
 
 
 def load_json(path: Path) -> dict:
@@ -76,6 +79,79 @@ def hit_indices(attempts: list[dict], expected_outputs: list) -> set[int]:
     return {i for i, _ in enumerate(expected_outputs) if i < len(attempts) and attempt_matches(attempts[i], expected_outputs[i])}
 
 
+def _grid_sig(g: Grid) -> tuple[tuple[int, ...], ...]:
+    return tuple(tuple(row) for row in g)
+
+
+def _loo_status(family: str, rule_name: str, train: list[tuple[Grid, Grid]]) -> str:
+    if len(train) < 2:
+        return "partial"
+    passed = 0
+    total = 0
+    for i, (held_inp, held_out) in enumerate(train):
+        subset = train[:i] + train[i + 1:]
+        try:
+            rules = FAMILY_FITTERS[family](subset)
+        except Exception:
+            total += 1
+            continue
+        matches = [r for r in rules if r.name == rule_name]
+        total += 1
+        ok = False
+        for rule in matches:
+            try:
+                ok = rule.predict(held_inp) == held_out
+            except Exception:
+                ok = False
+            if ok:
+                break
+        if ok:
+            passed += 1
+    if passed == total and total:
+        return "yes"
+    if passed == 0:
+        return "no"
+    return "partial"
+
+
+def _color_map_repairable(pred: Grid, exp: Grid) -> bool:
+    if not is_valid_grid(pred) or not is_valid_grid(exp) or len(pred) != len(exp) or len(pred[0]) != len(exp[0]):
+        return False
+    mapping: dict[int, int] = {}
+    for r, row in enumerate(pred):
+        for c, v in enumerate(row):
+            dst = exp[r][c]
+            if v in mapping and mapping[v] != dst:
+                return False
+            mapping[v] = dst
+    return True
+
+
+def _residual_summary(pred: Grid | None, exp_rows) -> str:
+    exp = as_grid(exp_rows)
+    if not is_valid_grid(pred):
+        return "shape_match=no mismatch_count=? mismatch_bbox=- added_cells_count=? deleted_cells_count=? recolored_cells_count=? foreground_mask_agreement=no color_map_repairable=no"
+    p = pred  # type: ignore[assignment]
+    shape_match = len(p) == len(exp) and (not p or not exp or len(p[0]) == len(exp[0]))
+    if not shape_match:
+        return "shape_match=no mismatch_count=? mismatch_bbox=- added_cells_count=? deleted_cells_count=? recolored_cells_count=? foreground_mask_agreement=no color_map_repairable=no"
+    mism=[]; added=deleted=recolored=fg_agree=fg_total=0
+    for r,row in enumerate(p):
+        for c,v in enumerate(row):
+            e=exp[r][c]
+            if (v != 0) == (e != 0): fg_agree += 1
+            fg_total += 1
+            if v != e:
+                mism.append((r,c))
+                if v == 0 and e != 0: added += 1
+                elif v != 0 and e == 0: deleted += 1
+                else: recolored += 1
+    bbox = "-" if not mism else f"({min(r for r,_ in mism)},{min(c for _,c in mism)})-({max(r for r,_ in mism)},{max(c for _,c in mism)})"
+    fg = f"{fg_agree}/{fg_total}"
+    repair = "yes" if _color_map_repairable(p, exp) else "no"
+    return f"shape_match=yes mismatch_count={len(mism)} mismatch_bbox={bbox} added_cells_count={added} deleted_cells_count={deleted} recolored_cells_count={recolored} foreground_mask_agreement={fg} color_map_repairable={repair}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline experimental ARC rule-discovery lab.")
     parser.add_argument("--all", action="store_true", help="Run all families (default).")
@@ -85,6 +161,7 @@ def main() -> int:
     parser.add_argument("--only-new-hits", action="store_true", help="Hide candidates with zero new hits.")
     parser.add_argument("--challenges", default="data/arc-agi_training_challenges.json")
     parser.add_argument("--solutions", default="data/arc-agi_training_solutions.json")
+    parser.add_argument("--diagnostics", action="store_true", help="Report leave-one-out, support grouping, and compact residuals for evidenced candidates.")
     args = parser.parse_args()
 
     families = select_families(None if args.all or not args.family else args.family)
@@ -114,6 +191,8 @@ def main() -> int:
         prod_hit_idxs = hit_indices(prod_attempts, expected)
 
         train = train_pairs(task)
+        task_support: dict[tuple[int, tuple[tuple[int, ...], ...]], list[str]] = {}
+        task_predictions: dict[tuple[str, str], tuple[list[Grid | None], set[int], set[int]]] = {}
         for family in families:
             try:
                 rules = FAMILY_FITTERS[family](train)
@@ -133,8 +212,36 @@ def main() -> int:
                 rec.hits += ch
                 rec.new += len(new_idxs)
                 rec.overlap += len(overlap_idxs)
+                preds_for_diag: list[Grid | None] = []
+                for item in task["test"]:
+                    try:
+                        p = rule.predict(as_grid(item["input"]))
+                    except Exception:
+                        p = None
+                    preds_for_diag.append(p if is_valid_grid(p) else None)  # type: ignore[arg-type]
+                if args.diagnostics:
+                    for ti, pred in enumerate(preds_for_diag):
+                        if pred is not None:
+                            task_support[(ti, _grid_sig(pred))] = task_support.get((ti, _grid_sig(pred)), []) + [rule.name]
+                    task_predictions[(family, rule.name)] = (preds_for_diag, cand_hit_idxs, new_idxs)
                 if cand_hit_idxs:
                     rec.tasks.add(task_id)
+
+        if args.diagnostics:
+            for (family, name), (preds, cand_hit_idxs, new_idxs) in task_predictions.items():
+                if not (cand_hit_idxs or new_idxs):
+                    continue
+                rec = stats[(family, name)]
+                if new_idxs:
+                    rec.loo[task_id] = _loo_status(family, name, train)
+                for ti, pred in enumerate(preds):
+                    if pred is None:
+                        continue
+                    supporters = task_support.get((ti, _grid_sig(pred)), [])
+                    if len(supporters) > 1 and (ti in cand_hit_idxs or ti in new_idxs):
+                        rec.support[f"{task_id}#{ti}"] = (len(supporters), sorted(set(supporters)))
+                    if ti < len(expected) and ti not in cand_hit_idxs:
+                        rec.residuals[f"{task_id}#{ti}"] = _residual_summary(pred, expected[ti])
 
     rows = sorted(stats.values(), key=lambda r: (-r.new, -r.hits, r.family, r.name))
     if args.only_new_hits:
@@ -146,6 +253,13 @@ def main() -> int:
         task_list = ", ".join(sorted(r.tasks)) if r.tasks else "-"
         err = f" errors={r.errors}" if r.errors else ""
         print(f"{r.family} | {r.name} | {r.hits} | {r.new} | {r.overlap} | {task_list}{err}")
+        if args.diagnostics:
+            if r.loo:
+                print(f"  diagnostics: LOO pass: {'; '.join(f'{k}={v}' for k, v in sorted(r.loo.items()))}")
+            for key, (count, names) in sorted(r.support.items()):
+                print(f"  diagnostics: {key} support_count={count} supporting_rule_names={', '.join(names[:12])}{' ...' if len(names) > 12 else ''}")
+            for key, summary in sorted(r.residuals.items()):
+                print(f"  diagnostics: {key} residual {summary}")
 
     candidate_total = sum(r.hits for r in stats.values())
     candidate_new = sum(r.new for r in stats.values())

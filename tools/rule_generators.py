@@ -781,6 +781,234 @@ def fit_crop_to_background_bbox(train: Train) -> list[Rule]:
             continue
     return rules
 
+# Experimental family: recolor components by rank
+
+def _comp_info(g: Grid, comp: list[tuple[int, int]]) -> dict:
+    rs = [r for r, _ in comp]; cs = [c for _, c in comp]
+    return {"cells": comp, "r0": min(rs), "c0": min(cs), "r1": max(rs), "c1": max(cs), "area": len(comp), "h": max(rs)-min(rs)+1, "w": max(cs)-min(cs)+1}
+
+
+def _sort_infos(infos: list[dict], mode: str) -> list[dict]:
+    rev = mode.endswith("descending") or mode in ("right_to_left", "bottom_to_top")
+    if mode.startswith("area_"): key = lambda x: (x["area"], x["r0"], x["c0"])
+    elif mode.startswith("height_"): key = lambda x: (x["h"], x["r0"], x["c0"])
+    elif mode.startswith("width_"): key = lambda x: (x["w"], x["r0"], x["c0"])
+    elif mode in ("left_to_right", "right_to_left"): key = lambda x: (x["c0"], x["r0"], x["area"])
+    else: key = lambda x: (x["r0"], x["c0"], x["area"])
+    return sorted(infos, key=key, reverse=rev)
+
+
+def _fit_rank_recolor(train: Train, modes: tuple[str, ...], bars: bool = False) -> list[Rule]:
+    rules: list[Rule] = []
+    for mode in modes:
+        mapping: dict[int, int] = {}; changed = False; ok = True
+        for inp, out in train:
+            if shape(inp) != shape(out): ok = False; break
+            comps = [_comp_info(inp, c) for c in _components4(inp)]
+            if bars:
+                want_v = mode.startswith("vertical_"); want_h = mode.startswith("horizontal_")
+                comps = [x for x in comps if (want_v and x["h"] > 1 and x["w"] == 1) or (want_h and x["h"] == 1 and x["w"] > 1)]
+                smode = mode.replace("vertical_bars_", "").replace("horizontal_bars_", "")
+            else:
+                smode = mode
+            bar_cells = {p for x in comps for p in x["cells"]}
+            if bars:
+                for r, row in enumerate(inp):
+                    for c, v in enumerate(row):
+                        if (r, c) not in bar_cells and out[r][c] != v: ok = False; break
+                    if not ok: break
+                if not ok: break
+            else:
+                for r, row in enumerate(inp):
+                    for c, v in enumerate(row):
+                        if v == 0 and out[r][c] != 0: ok = False; break
+                    if not ok: break
+                if not ok: break
+            for idx, info in enumerate(_sort_infos(comps, smode)):
+                vals = {out[r][c] for r, c in info["cells"]}
+                if len(vals) != 1 or 0 in vals: ok = False; break
+                col = next(iter(vals))
+                if idx in mapping and mapping[idx] != col: ok = False; break
+                mapping[idx] = col
+                if any(inp[r][c] != col for r, c in info["cells"]): changed = True
+            if not ok: break
+        if not ok or not changed: continue
+        def fn(g: Grid, mode=mode, mapping=mapping, bars=bars) -> Grid | None:
+            comps = [_comp_info(g, c) for c in _components4(g)]
+            if bars:
+                want_v = mode.startswith("vertical_"); want_h = mode.startswith("horizontal_")
+                comps = [x for x in comps if (want_v and x["h"] > 1 and x["w"] == 1) or (want_h and x["h"] == 1 and x["w"] > 1)]
+                smode = mode.replace("vertical_bars_", "").replace("horizontal_bars_", "")
+            else: smode = mode
+            rows = _mutable(g)
+            for idx, info in enumerate(_sort_infos(comps, smode)):
+                if idx in mapping:
+                    for r, c in info["cells"]: rows[r][c] = mapping[idx]
+            return _freeze(rows)
+        if _validate(train, fn):
+            prefix = "gen_recolor_bars_by_order" if bars else "gen_recolor_components_by_rank"
+            rules.append(_rule(f"{prefix}_{mode}", fn))
+    return rules
+
+
+def fit_recolor_components_by_rank(train: Train) -> list[Rule]:
+    return _fit_rank_recolor(train, ("left_to_right","right_to_left","top_to_bottom","bottom_to_top","area_ascending","area_descending","height_ascending","height_descending","width_ascending","width_descending"), False)
+
+
+def fit_recolor_bars_by_order(train: Train) -> list[Rule]:
+    return _fit_rank_recolor(train, ("vertical_bars_left_to_right","vertical_bars_top_to_bottom","vertical_bars_height_ascending","vertical_bars_height_descending","horizontal_bars_top_to_bottom","horizontal_bars_left_to_right","horizontal_bars_width_ascending","horizontal_bars_width_descending"), True)
+
+
+# Experimental family: split-panel boolean operations
+
+def _two_panels_axis(g: Grid, axis: str) -> tuple[Grid, Grid] | None:
+    h, w = shape(g); seps = _sep_cols(g) if axis == "col" else _sep_rows(g)
+    if len(seps) != 1: return None
+    spans = _spans(w if axis == "col" else h, seps)
+    if len(spans) != 2: return None
+    a0,b0 = spans[0]; a1,b1 = spans[1]
+    p0 = tuple(tuple(row[c] for c in range(a0,b0)) for row in g) if axis == "col" else tuple(tuple(g[r][c] for c in range(w)) for r in range(a0,b0))
+    p1 = tuple(tuple(row[c] for c in range(a1,b1)) for row in g) if axis == "col" else tuple(tuple(g[r][c] for c in range(w)) for r in range(a1,b1))
+    return (p0, p1) if shape(p0) == shape(p1) else None
+
+
+def _panel_bool(g: Grid, axis: str, op: str, color: int | None) -> Grid | None:
+    panels = _two_panels_axis(g, axis)
+    if panels is None: return None
+    a,b = panels; h,w = shape(a); rows=[]
+    for r in range(h):
+        row=[]
+        for c in range(w):
+            x,y=a[r][c],b[r][c]
+            if op == "and_prefer_first": v = x if x and y else 0
+            elif op == "and_prefer_second": v = y if x and y else 0
+            elif op == "xor": v = x if x and not y else (y if y and not x else 0)
+            elif op == "left_minus_right": v = x if x and not y else 0
+            elif op == "right_minus_left": v = y if y and not x else 0
+            elif op == "overlap_only_color": v = (color or 0) if x and y else 0
+            else: v = (color or 0) if x and y else (x if x and not y else (y if y and not x else 0))
+            row.append(v)
+        rows.append(row)
+    return _freeze(rows)
+
+
+def fit_split_panel_boolean_operation(train: Train) -> list[Rule]:
+    rules=[]; ops=("and_prefer_first","and_prefer_second","xor","left_minus_right","right_minus_left")
+    for axis in ("col","row"):
+        for op in ops:
+            fn=lambda g,axis=axis,op=op:_panel_bool(g,axis,op,None)
+            if _validate(train,fn): rules.append(_rule(f"gen_panel_bool_{axis}_{op}",fn))
+        for op,prefix in (("overlap_only_color","overlap_color"),("union_learned_overlap_color","union_overlap_color")):
+            for color in range(1,10):
+                fn=lambda g,axis=axis,op=op,color=color:_panel_bool(g,axis,op,color)
+                if _validate(train,fn): rules.append(_rule(f"gen_panel_bool_{axis}_{prefix}_{color}",fn))
+    return rules
+
+
+# Experimental family: bounded rays
+_DIRS={"up":(-1,0),"down":(1,0),"left":(0,-1),"right":(0,1)}
+
+def _seed_points(g: Grid, seed_mode: str) -> list[tuple[int,int]]:
+    infos=[_comp_info(g,c) for c in _components4(g)]; pts=[]
+    for x in infos:
+        cells=x["cells"]
+        if seed_mode=="singletons" and len(cells)==1: pts += cells
+        elif seed_mode=="horizontal_endpoints" and x["h"]==1 and x["w"]>1 and len(cells)==x["w"]:
+            r=x["r0"]; pts += [(r,x["c0"]),(r,x["c1"])]
+        elif seed_mode=="vertical_endpoints" and x["w"]==1 and x["h"]>1 and len(cells)==x["h"]:
+            c=x["c0"]; pts += [(x["r0"],c),(x["r1"],c)]
+    return pts
+
+
+def _extend_rays(g: Grid, seed_mode: str, direction: str, stop: str) -> Grid | None:
+    h,w=shape(g); dr,dc=_DIRS[direction]; rows=_mutable(g)
+    for r,c in _seed_points(g, seed_mode):
+        col=g[r][c]; nr,nc=r+dr,c+dc
+        while 0 <= nr < h and 0 <= nc < w:
+            v=g[nr][nc]
+            if stop=="until_blocked" and v!=0: break
+            if stop=="until_same_color" and v==col: break
+            if stop=="until_different_nonzero" and v!=0 and v!=col: break
+            if v==0: rows[nr][nc]=col
+            nr+=dr; nc+=dc
+    return _freeze(rows)
+
+
+def fit_extend_rays_to_marker_or_boundary(train: Train) -> list[Rule]:
+    rules=[]
+    for seed in ("singletons","horizontal_endpoints","vertical_endpoints"):
+        for direction in _DIRS:
+            for stop in ("to_boundary","until_blocked","until_same_color","until_different_nonzero"):
+                fn=lambda g,seed=seed,direction=direction,stop=stop:_extend_rays(g,seed,direction,stop)
+                if _validate(train,fn): rules.append(_rule(f"gen_extend_ray_{seed}_{direction}_{stop}",fn))
+    return rules
+
+
+# Experimental family: periodic tile with phase crop
+
+def _tile_source(g: Grid, source: str) -> Grid | None:
+    if source=="full_input": return g if shape(g)[0] and shape(g)[1] else None
+    if source=="nonzero_bbox_crop": return _crop_positions(g, nonzero_positions(g))
+    bgmode={"background_bbox_crop_zero":"zero","background_bbox_crop_most_common":"most_common","background_bbox_crop_corner":"corner"}.get(source)
+    return _crop_non_bg_bbox(g, bgmode) if bgmode else None
+
+
+def _periodic(tile: Grid, oh: int, ow: int, pr: int, pc: int) -> Grid | None:
+    th,tw=shape(tile)
+    if th<=0 or tw<=0: return None
+    return tuple(tuple(tile[(r+pr)%th][(c+pc)%tw] for c in range(ow)) for r in range(oh))
+
+
+def fit_periodic_tile_with_phase_crop(train: Train) -> list[Rule]:
+    rules: list[Rule] = []
+    sources = ("full_input", "nonzero_bbox_crop", "background_bbox_crop_zero", "background_bbox_crop_most_common", "background_bbox_crop_corner")
+    for source in sources:
+        tiles: list[Grid] = []
+        ok = True
+        for inp, _ in train:
+            tile = _tile_source(inp, source)
+            if not is_valid_grid(tile):
+                ok = False; break
+            tiles.append(tile)  # type: ignore[arg-type]
+        if not ok or not tiles:
+            continue
+        th0, tw0 = shape(tiles[0])
+        first_out = train[0][1]
+        ohf, owf = shape(first_out)
+        phase_candidates = []
+        for pr in range(th0):
+            for pc in range(tw0):
+                if ohf and owf and tiles[0][pr % th0][pc % tw0] != first_out[0][0]:
+                    continue
+                if ohf > 1 and tiles[0][(1 + pr) % th0][pc % tw0] != first_out[1][0]:
+                    continue
+                if owf > 1 and tiles[0][pr % th0][(1 + pc) % tw0] != first_out[0][1]:
+                    continue
+                phase_candidates.append((pr, pc))
+        for pr, pc in phase_candidates:
+                matched = True
+                for tile, (_, out) in zip(tiles, train):
+                    th, tw = shape(tile)
+                    if pr >= th or pc >= tw:
+                        matched = False; break
+                    oh, ow = shape(out)
+                    pred = _periodic(tile, oh, ow, pr, pc)
+                    if pred != out:
+                        matched = False; break
+                if not matched:
+                    continue
+                def fn(g: Grid, source=source, pr=pr, pc=pc) -> Grid | None:
+                    tile = _tile_source(g, source)
+                    if not is_valid_grid(tile):
+                        return None
+                    # Preserve the observed output-size delta for test grids.
+                    ih0, iw0 = shape(train[0][0]); oh0, ow0 = shape(train[0][1]); h, w = shape(g)
+                    return _periodic(tile, oh0 + (h - ih0), ow0 + (w - iw0), pr, pc)  # type: ignore[arg-type]
+                if _validate(train, fn):
+                    slug = {"full_input": "full_input", "nonzero_bbox_crop": "nonzero_bbox", "background_bbox_crop_zero": "bg_zero", "background_bbox_crop_most_common": "bg_most_common", "background_bbox_crop_corner": "bg_corner"}[source]
+                    rules.append(_rule(f"gen_periodic_tile_{slug}_phase_{pr}_{pc}", fn))
+    return rules
+
 
 FAMILY_FITTERS = {
     "align_bbox_to_edge": fit_align_bbox_to_edge,
@@ -802,6 +1030,11 @@ FAMILY_FITTERS = {
     "d4_conjugated_existing": fit_d4_conjugated_existing,
     "structure_then_color_map": fit_structure_then_color_map,
     "crop_to_background_bbox": fit_crop_to_background_bbox,
+    "periodic_tile_with_phase_crop": fit_periodic_tile_with_phase_crop,
+    "extend_rays_to_marker_or_boundary": fit_extend_rays_to_marker_or_boundary,
+    "split_panel_boolean_operation": fit_split_panel_boolean_operation,
+    "recolor_bars_by_order": fit_recolor_bars_by_order,
+    "recolor_components_by_rank": fit_recolor_components_by_rank,
 }
 
 FAMILY_ALIASES = {
@@ -825,4 +1058,15 @@ FAMILY_ALIASES = {
     "d4": "d4_conjugated_existing",
     "structure_color": "structure_then_color_map",
     "crop_bg": "crop_to_background_bbox",
+    "rank_components": "recolor_components_by_rank",
+    "recolor_components_by_rank": "recolor_components_by_rank",
+    "bars": "recolor_bars_by_order",
+    "recolor_bars_by_order": "recolor_bars_by_order",
+    "panel_bool": "split_panel_boolean_operation",
+    "split_panel_boolean_operation": "split_panel_boolean_operation",
+    "rays": "extend_rays_to_marker_or_boundary",
+    "extend_rays": "extend_rays_to_marker_or_boundary",
+    "extend_rays_to_marker_or_boundary": "extend_rays_to_marker_or_boundary",
+    "periodic": "periodic_tile_with_phase_crop",
+    "periodic_tile_with_phase_crop": "periodic_tile_with_phase_crop",
 }
