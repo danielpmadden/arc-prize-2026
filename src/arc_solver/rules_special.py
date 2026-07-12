@@ -1407,3 +1407,132 @@ def fit_translate_nonzero_color_map(train: list[tuple[Grid, Grid]]) -> list[Rule
 
     return [Rule(f"translate_nonzero_color_map_{dr}_{dc}", 19, predict)]
 
+
+
+def fit_sep_crop_largest_component(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def strip_separators(g: Grid) -> Optional[Grid]:
+        h, w = shape(g)
+        sep_rows = {
+            r for r, row in enumerate(g)
+            if row and row[0] != 0 and all(v == row[0] for v in row)
+        }
+        sep_cols = {
+            c for c in range(w)
+            if h and g[0][c] != 0 and all(g[r][c] == g[0][c] for r in range(h))
+        }
+        rows = [[v for c, v in enumerate(row) if c not in sep_cols] for r, row in enumerate(g) if r not in sep_rows]
+        if not rows or not rows[0]:
+            return None
+        return as_grid(rows)
+
+    def components4(g: Grid) -> list[list[tuple[int, int]]]:
+        h, w = shape(g)
+        seen: set[tuple[int, int]] = set()
+        comps: list[list[tuple[int, int]]] = []
+        for r in range(h):
+            for c in range(w):
+                color = g[r][c]
+                if color == 0 or (r, c) in seen:
+                    continue
+                stack = [(r, c)]
+                seen.add((r, c))
+                comp: list[tuple[int, int]] = []
+                while stack:
+                    rr, cc = stack.pop()
+                    comp.append((rr, cc))
+                    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nr, nc = rr + dr, cc + dc
+                        if 0 <= nr < h and 0 <= nc < w and (nr, nc) not in seen and g[nr][nc] == color:
+                            seen.add((nr, nc))
+                            stack.append((nr, nc))
+                comps.append(comp)
+        return comps
+
+    def predict(g: Grid) -> Optional[Grid]:
+        stripped = strip_separators(g)
+        if stripped is None:
+            return None
+        comps = components4(stripped)
+        if not comps:
+            return None
+        sizes = Counter(len(comp) for comp in comps)
+        largest = max(sizes)
+        if sizes[largest] != 1:
+            return None
+        comp = max(comps, key=len)
+        r0, c0, r1, c1 = bbox_for_positions(comp)
+        return crop_rect(stripped, (r0, c0, r1, c1))
+
+    for inp, out in train:
+        if predict(inp) != out:
+            return []
+
+    return [Rule("sep_crop_largest_component", 13, predict)]
+
+
+def fit_periodic_add_complete_lattice_10_10(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def predict(g: Grid) -> Grid:
+        h, w = shape(g)
+        rows = [list(row) for row in g]
+        for color in nonzero_colors(g):
+            pts = [(r, c) for r, row in enumerate(g) for c, v in enumerate(row) if v == color]
+            if len(pts) < 2:
+                continue
+            row_residues = {r % 10 for r, _ in pts}
+            col_residues = {c % 10 for _, c in pts}
+            for r in range(h):
+                for c in range(w):
+                    if rows[r][c] == 0 and r % 10 in row_residues and c % 10 in col_residues:
+                        rows[r][c] = color
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        h, w = shape(inp)
+        for r in range(h):
+            for c in range(w):
+                if inp[r][c] != out[r][c] and not (inp[r][c] == 0 and out[r][c] != 0):
+                    return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("periodic_add_complete_lattice_10_10", 18, predict)]
+
+
+def fit_periodic_add_full_grid_period_2_2(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    pattern: dict[tuple[int, int], int] = {}
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        h, w = shape(inp)
+        for r in range(h):
+            for c in range(w):
+                if inp[r][c] == out[r][c]:
+                    continue
+                if inp[r][c] != 0 or out[r][c] == 0:
+                    return []
+                key = (r % 2, c % 2)
+                if key in pattern and pattern[key] != out[r][c]:
+                    return []
+                pattern[key] = out[r][c]
+
+    if not pattern:
+        return []
+
+    def predict(g: Grid, pattern=pattern) -> Grid:
+        h, w = shape(g)
+        rows = [list(row) for row in g]
+        for r in range(h):
+            for c in range(w):
+                color = pattern.get((r % 2, c % 2))
+                if color is not None and g[r][c] == 0:
+                    rows[r][c] = color
+        return as_grid(rows)
+
+    for inp, out in train:
+        if predict(inp) != out:
+            return []
+
+    return [Rule("periodic_add_full_grid_period_2_2", 18, predict)]
