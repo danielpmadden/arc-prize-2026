@@ -11,8 +11,8 @@ from src.arc_solver.rules_basic import (
 from src.arc_solver.rules_special import (
     fit_block_compress, fit_complete_symmetry, fit_expand_crosses_5x5,
     fit_extend_vertical_period, fit_fill_enclosed_regions, fit_fill_rectangles_by_size,
-    fit_split_intersection_bar, fit_staircase_components, fit_translate_nonzero,
-    fit_translate_nonzero_color_map,
+    fit_connect_same_color_pairs, fit_dilate_8_added_color_1, fit_split_intersection_bar,
+    fit_staircase_components, fit_translate_nonzero, fit_translate_nonzero_color_map,
 )
 
 
@@ -27,6 +27,8 @@ def fit_rules(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     rules.extend(fit_recolor_by_key_shape(train))
     rules.extend(fit_expand_crosses_5x5(train))
     rules.extend(fit_split_intersection_bar(train))
+    rules.extend(fit_connect_same_color_pairs(train))
+    rules.extend(fit_dilate_8_added_color_1(train))
     rules.extend(fit_fill_rectangles_by_size(train))
     rules.extend(fit_fill_enclosed_regions(train))
     rules.extend(fit_staircase_components(train))
