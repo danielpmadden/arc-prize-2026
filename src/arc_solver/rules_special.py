@@ -8,7 +8,7 @@ from src.arc_solver.grid_utils import (
     as_grid, bbox_for_positions, colors, constant_grid, crop_rect, most_common_color,
     nonzero_colors, nonzero_positions, positions_of, shape,
 )
-from src.arc_solver.transforms import infer_color_map, apply_color_map
+from src.arc_solver.transforms import infer_color_map, apply_color_map, rot90, rot270, transpose
 
 
 # Proven custom high-value ARC rules; keep their behavior narrow and order-controlled in predict.py.
@@ -111,6 +111,54 @@ def fit_connect_same_color_pairs(train: list[tuple[Grid, Grid]]) -> list[Rule]:
             return []
 
     return [Rule("connect_same_color_pairs", 17, predict)]
+
+
+def fit_d4_connect_same_color_pairs(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    def anti_transpose_grid(g: Grid) -> Grid:
+        h, w = shape(g)
+        return tuple(tuple(g[h - 1 - r][w - 1 - c] for r in range(h)) for c in range(w))
+
+    def connect_same_color_pairs(g: Grid) -> Grid:
+        rows = [list(row) for row in g]
+        for color in nonzero_colors(g):
+            pts = [(r, c) for r, row in enumerate(g) for c, v in enumerate(row) if v == color]
+            if len(pts) != 2:
+                continue
+            (r0, c0), (r1, c1) = pts
+            if r0 == r1:
+                for c in range(min(c0, c1), max(c0, c1) + 1):
+                    rows[r0][c] = color
+            elif c0 == c1:
+                for r in range(min(r0, r1), max(r0, r1) + 1):
+                    rows[r][c0] = color
+        return as_grid(rows)
+
+    ops = [
+        ("rot90", rot90, rot270),
+        ("rot270", rot270, rot90),
+        ("transpose", transpose, transpose),
+        ("anti_transpose", anti_transpose_grid, anti_transpose_grid),
+    ]
+
+    rules: list[Rule] = []
+    for op_name, forward, inverse in ops:
+        ok = True
+        for inp, out in train:
+            if shape(inp) != shape(out):
+                ok = False
+                break
+            if connect_same_color_pairs(forward(inp)) != forward(out):
+                ok = False
+                break
+        if not ok:
+            continue
+
+        def predict(g: Grid, forward=forward, inverse=inverse) -> Grid:
+            return inverse(connect_same_color_pairs(forward(g)))
+
+        rules.append(Rule(f"d4_{op_name}_connect_same_color_pairs", 16, predict))
+
+    return rules
 
 
 def fit_dilate_8_added_color_1(train: list[tuple[Grid, Grid]]) -> list[Rule]:
