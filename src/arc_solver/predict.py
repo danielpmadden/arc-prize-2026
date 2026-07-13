@@ -17,6 +17,8 @@ from src.arc_solver.rules_special import (
     fit_connect_same_color_pairs, fit_d4_connect_same_color_pairs,
     fit_extend_ray_singletons_down, fit_dilate_8_added_color_1, fit_split_intersection_bar,
     fit_connect_two_markers_manhattan, fit_place_cross_at_marker_midpoint,
+    fit_move_sparse_color_to_row_gaps, fit_recolor_nested_shell_cycle,
+    fit_constant_most_frequent_color, fit_fill_marker_to_nearest_corner,
     fit_staircase_components, fit_translate_nonzero, fit_translate_nonzero_color_map,
 )
 
@@ -49,6 +51,10 @@ def fit_rules(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     rules.extend(fit_extend_ray_singletons_down(train))
     rules.extend(fit_connect_two_markers_manhattan(train))
     rules.extend(fit_place_cross_at_marker_midpoint(train))
+    rules.extend(fit_move_sparse_color_to_row_gaps(train))
+    rules.extend(fit_recolor_nested_shell_cycle(train))
+    rules.extend(fit_constant_most_frequent_color(train))
+    rules.extend(fit_fill_marker_to_nearest_corner(train))
     rules.extend(fit_extend_vertical_period(train))
     rules.extend(fit_geom_and_color(train))
     rules.extend(fit_upscale(train))

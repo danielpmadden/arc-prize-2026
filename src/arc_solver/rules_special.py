@@ -1566,6 +1566,248 @@ def _foreground_singletons(g: Grid) -> list[tuple[int, int, int]]:
     return singles
 
 
+
+
+
+
+
+def _grid_color_counts(g: Grid) -> Counter[int]:
+    return Counter(v for row in g for v in row)
+
+
+def _unique_mode_color(g: Grid) -> int | None:
+    counts = _grid_color_counts(g)
+    if not counts:
+        return None
+    ranked = counts.most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None
+    return ranked[0][0]
+
+
+def _two_foreground_colors_by_count(g: Grid) -> tuple[int, int, int, int] | None:
+    """Return (background, sparse_color, sparse_count, other_color) with ambiguity rejected."""
+    counts = _grid_color_counts(g)
+    if len(counts) != 3:
+        return None
+    bg = counts.most_common(1)[0][0]
+    foreground = [(count, color) for color, count in counts.items() if color != bg]
+    if len(foreground) != 2:
+        return None
+    foreground.sort()
+    if foreground[0][0] >= foreground[1][0]:
+        return None
+    sparse_count, sparse_color = foreground[0]
+    _, other_color = foreground[1]
+    return bg, sparse_color, sparse_count, other_color
+
+
+def _first_unique_order(values: list[int]) -> list[int]:
+    order: list[int] = []
+    for value in values:
+        if value not in order:
+            order.append(value)
+    return order
+
+
+def _cyclic_previous_mapping(order: list[int]) -> dict[int, int] | None:
+    if len(order) < 2:
+        return None
+    return {color: order[i - 1] for i, color in enumerate(order)}
+
+def fit_move_sparse_color_to_row_gaps(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    """Move a sparse color into row gaps of one 8-connected marker group.
+
+    Preconditions are narrow and demonstration-checked: there must be a dominant
+    background plus two foreground colors.  The less frequent foreground color is
+    removed to background, then used to fill horizontal gaps between same-row
+    cells in exactly one 8-connected group of the other foreground color.  The
+    selected group's gap count must equal the removed source-cell count.
+    """
+
+    def eight_components(points: set[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+        remaining = set(points)
+        comps: list[list[tuple[int, int]]] = []
+        while remaining:
+            start = remaining.pop()
+            stack = [start]
+            comp = [start]
+            while stack:
+                r, c = stack.pop()
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nxt = (r + dr, c + dc)
+                        if nxt in remaining:
+                            remaining.remove(nxt)
+                            stack.append(nxt)
+                            comp.append(nxt)
+            comps.append(comp)
+        return comps
+
+    def predict(g: Grid) -> Grid | None:
+        roles = _two_foreground_colors_by_count(g)
+        if roles is None:
+            return None
+        bg, source, source_count, target = roles
+        target_points = {(r, c) for r, row in enumerate(g) for c, v in enumerate(row) if v == target}
+        candidates: list[set[tuple[int, int]]] = []
+        for comp in eight_components(target_points):
+            by_row: dict[int, list[int]] = {}
+            for r, c in comp:
+                by_row.setdefault(r, []).append(c)
+            fill: set[tuple[int, int]] = set()
+            for r, cols in by_row.items():
+                if len(cols) < 2:
+                    continue
+                for c in range(min(cols) + 1, max(cols)):
+                    if g[r][c] == bg:
+                        fill.add((r, c))
+            if len(fill) == source_count:
+                candidates.append(fill)
+        if len(candidates) != 1:
+            return None
+        rows = [list(row) for row in g]
+        for r, row in enumerate(g):
+            for c, value in enumerate(row):
+                if value == source:
+                    rows[r][c] = bg
+        for r, c in candidates[0]:
+            if rows[r][c] != bg:
+                return None
+            rows[r][c] = source
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("move_sparse_color_to_row_gaps", 18, predict)]
+
+def fit_recolor_nested_shell_cycle(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    """Recolor concentric rectangular shells by cyclic shell-color order.
+
+    The shell order is inferred by peeling uniform rectangular perimeters from
+    the outside inward and recording first occurrences of shell colors.  The
+    learned transform maps each color to the previous color in that ordered
+    cycle.  Ambiguous/non-rectangular shells reject through exact validation.
+    """
+
+    def shell_color_order(g: Grid) -> list[int] | None:
+        h, w = shape(g)
+        raw: list[int] = []
+        layers = (min(h, w) + 1) // 2
+        for k in range(layers):
+            r0, c0 = k, k
+            r1, c1 = h - 1 - k, w - 1 - k
+            cells: list[int] = []
+            for c in range(c0, c1 + 1):
+                cells.append(g[r0][c])
+                if r1 != r0:
+                    cells.append(g[r1][c])
+            for r in range(r0 + 1, r1):
+                cells.append(g[r][c0])
+                if c1 != c0:
+                    cells.append(g[r][c1])
+            if not cells or len(set(cells)) != 1:
+                return None
+            raw.append(cells[0])
+        order = _first_unique_order(raw)
+        return order if len(order) >= 2 else None
+
+    def predict(g: Grid) -> Grid | None:
+        order = shell_color_order(g)
+        if order is None:
+            return None
+        mapping = _cyclic_previous_mapping(order)
+        if mapping is None or set(colors(g)) - set(mapping):
+            return None
+        return as_grid([[mapping[v] for v in row] for row in g])
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("recolor_nested_shell_cycle", 18, predict)]
+
+def fit_constant_most_frequent_color(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    """Predict a same-shape constant grid using the input's unique most frequent color.
+
+    This promotes a narrow two-attempt opportunity discovered in the MIME lab:
+    every training output must be constant, same-shaped, and equal to the
+    unique most frequent color of its corresponding input.  Ambiguous input
+    modes reject rather than choosing arbitrarily.
+    """
+
+    def predict(g: Grid) -> Grid | None:
+        color = _unique_mode_color(g)
+        if color is None:
+            return None
+        h, w = shape(g)
+        return constant_grid(h, w, color)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        mode = _unique_mode_color(inp)
+        if mode is None:
+            return []
+        if any(cell != mode for row in out for cell in row):
+            return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("constant_most_frequent_color", 19, predict)]
+
+def fit_fill_marker_to_nearest_corner(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    """Fill the rectangle spanned by a unique singleton marker and its nearest grid corner.
+
+    Preconditions are intentionally narrow: the input must contain exactly two colors,
+    one most-common background color and one singleton marker color.  The nearest
+    corner must be unique, and the output must be identical except for recoloring
+    the closed marker-to-corner rectangle to the marker color.
+    """
+
+    def predict(g: Grid) -> Grid | None:
+        h, w = shape(g)
+        counts = Counter(v for row in g for v in row)
+        if len(counts) != 2:
+            return None
+        singleton_colors = [color for color, count in counts.items() if count == 1]
+        if len(singleton_colors) != 1:
+            return None
+        marker_color = singleton_colors[0]
+        marker_positions = positions_of(g, marker_color)
+        if len(marker_positions) != 1:
+            return None
+        mr, mc = sorted(marker_positions)[0]
+        corners = [(0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1)]
+        distances = [(abs(mr - r) + abs(mc - c), r, c) for r, c in corners]
+        distances.sort()
+        if len(distances) > 1 and distances[0][0] == distances[1][0]:
+            return None
+        _, cr, cc = distances[0]
+        r0, r1 = sorted((mr, cr))
+        c0, c1 = sorted((mc, cc))
+        rows = [list(row) for row in g]
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                rows[r][c] = marker_color
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        if predict(inp) != out:
+            return []
+
+    return [Rule("fill_marker_to_nearest_corner", 18, predict)]
+
 def fit_connect_two_markers_manhattan(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     """Promoted narrow bridge rule: add a learned-color HV shortest path between two singleton markers."""
     learned_color: int | None = None
