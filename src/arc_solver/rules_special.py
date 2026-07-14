@@ -1808,6 +1808,75 @@ def fit_fill_marker_to_nearest_corner(train: list[tuple[Grid, Grid]]) -> list[Ru
 
     return [Rule("fill_marker_to_nearest_corner", 18, predict)]
 
+
+def fit_extrapolate_nested_rectangle_shell(train: list[tuple[Grid, Grid]]) -> list[Rule]:
+    """Add the next outer rectangular shell in a two-color nested rectangle hierarchy.
+
+    The primitive treats nested rectangles as a recurrence: an inner role color becomes
+    the next enclosing shell.  The growth distance is the inner rectangle's larger
+    side, limited uniformly by the nearest grid boundary so the hierarchy remains
+    on-grid.
+    """
+
+    def color_bbox(g: Grid, color: int) -> tuple[int, int, int, int] | None:
+        return bbox_for_positions(positions_of(g, color))
+
+    def is_filled_rect(g: Grid, color: int, box: tuple[int, int, int, int]) -> bool:
+        r0, c0, r1, c1 = box
+        return all(g[r][c] == color for r in range(r0, r1 + 1) for c in range(c0, c1 + 1))
+
+    def predict(g: Grid) -> Grid | None:
+        h, w = shape(g)
+        fg = nonzero_colors(g)
+        if len(fg) != 2:
+            return None
+
+        boxes = {color: color_bbox(g, color) for color in fg}
+        if any(box is None for box in boxes.values()):
+            return None
+
+        inner_color = None
+        inner_box = outer_box = None
+        for a in fg:
+            ar0, ac0, ar1, ac1 = boxes[a]  # type: ignore[misc]
+            for b in fg:
+                if a == b:
+                    continue
+                br0, bc0, br1, bc1 = boxes[b]  # type: ignore[misc]
+                if br0 < ar0 and bc0 < ac0 and ar1 < br1 and ac1 < bc1:
+                    inner_color, inner_box = a, (ar0, ac0, ar1, ac1)
+                    outer_box = (br0, bc0, br1, bc1)
+
+        if inner_color is None or inner_box is None or outer_box is None:
+            return None
+        if not is_filled_rect(g, inner_color, inner_box):
+            return None
+
+        ir0, ic0, ir1, ic1 = inner_box
+        or0, oc0, or1, oc1 = outer_box
+        growth = max(ir1 - ir0 + 1, ic1 - ic0 + 1)
+        boundary_limit = min(or0, oc0, h - 1 - or1, w - 1 - oc1)
+        growth = min(growth, boundary_limit)
+        if growth <= 0:
+            return None
+
+        nr0, nc0, nr1, nc1 = or0 - growth, oc0 - growth, or1 + growth, oc1 + growth
+        rows = [list(row) for row in g]
+        for r in range(nr0, nr1 + 1):
+            for c in range(nc0, nc1 + 1):
+                if rows[r][c] == 0:
+                    rows[r][c] = inner_color
+        return as_grid(rows)
+
+    for inp, out in train:
+        if shape(inp) != shape(out):
+            return []
+        pred = predict(inp)
+        if pred != out:
+            return []
+
+    return [Rule("extrapolate_nested_rectangle_shell", 18, predict)]
+
 def fit_connect_two_markers_manhattan(train: list[tuple[Grid, Grid]]) -> list[Rule]:
     """Promoted narrow bridge rule: add a learned-color HV shortest path between two singleton markers."""
     learned_color: int | None = None
