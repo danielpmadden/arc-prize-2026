@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Optional
 
-from src.arc_solver.types import Grid
+from .types import Grid
 
 
 def as_grid(rows) -> Grid:

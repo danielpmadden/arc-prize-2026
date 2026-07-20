@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from src.arc_solver.grid_utils import as_grid, as_rows, colors, shape
-from src.arc_solver.scoring import build_submission
+from .grid_utils import as_grid, as_rows, colors, shape
+from .scoring import build_submission
 
 
 def resolve_input_path(path_value: str) -> Path:
@@ -83,7 +83,11 @@ def inspect_task(task_id: str, challenges: dict, solutions: Optional[dict] = Non
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Baseline ARC rule-based solver")
-    parser.add_argument("--challenges", required=True, help="Path to ARC challenges JSON")
+    parser.add_argument(
+        "--challenges",
+        default="data/arc-agi_evaluation_challenges.json",
+        help="Path to ARC challenges JSON (default: bundled evaluation challenges)",
+    )
     parser.add_argument("--out", default="submission.json", help="Output submission JSON")
     parser.add_argument(
         "--solutions",
@@ -154,4 +158,3 @@ def main() -> None:
         print(f"Final exact-match score: {hits}/{total} = {acc:.3%}")
     else:
         print("Final exact-match score: unavailable because no solutions were loaded.")
-

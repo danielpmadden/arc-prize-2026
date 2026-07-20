@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Optional
 
-from src.arc_solver.types import Grid, Rule
-from src.arc_solver.grid_utils import (
+from .types import Grid, Rule
+from .grid_utils import (
     as_grid, bbox_for_positions, colors, constant_grid, crop_non_bg, crop_rect,
     most_common_color, nonzero_colors, nonzero_positions, normalize_mask, positions_of, shape,
 )
-from src.arc_solver.transforms import GEOMS, apply_color_map, infer_color_map
+from .transforms import GEOMS, apply_color_map, infer_color_map
 
 
 def fit_geom_and_color(train: list[tuple[Grid, Grid]]) -> list[Rule]:
