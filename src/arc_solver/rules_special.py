@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections import Counter, deque
 from typing import Optional
 
-from src.arc_solver.types import Grid, Rule
-from src.arc_solver.grid_utils import (
+from .types import Grid, Rule
+from .grid_utils import (
     as_grid, bbox_for_positions, colors, constant_grid, crop_rect, is_valid_grid, most_common_color,
     nonzero_colors, nonzero_positions, positions_of, shape,
 )
-from src.arc_solver.transforms import infer_color_map, apply_color_map, rot90, rot270, transpose
+from .transforms import infer_color_map, apply_color_map, rot90, rot270, transpose
 
 
 # Proven custom high-value ARC rules; keep their behavior narrow and order-controlled in predict.py.

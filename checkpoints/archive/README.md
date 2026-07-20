@@ -1,5 +1,10 @@
 # Archived checkpoints
 
+> **Document role: historical index.** Every file below describes a superseded
+> snapshot, not the current checkout. Use the repository [`README.md`](../../README.md)
+> for current behavior and [`CHECKPOINTS.md`](../../CHECKPOINTS.md) for the
+> verified milestone chronology.
+
 This folder contains every superseded solver checkpoint. The top-level
 `checkpoints/` directory intentionally contains only this archive and the
 current checkpoint directory.

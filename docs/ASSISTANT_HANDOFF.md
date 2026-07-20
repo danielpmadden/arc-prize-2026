@@ -1,5 +1,12 @@
 # Assistant Handoff
 
+> **Document role: contributor guidance.** This document summarizes the current
+> checkout and records maintenance constraints. The production implementation is
+> authoritative for behavior; [`CHECKPOINTS.md`](../CHECKPOINTS.md) is the
+> verified historical record. Sections named "deferred", "rejected", "residual",
+> or "recommended experiments" are explicitly future work, not implemented
+> capabilities or specifications.
+
 ## Project identity
 
 This is a deterministic Python ARC solver. Production rules are fitted from all train pairs, exact-validated against every train output, and then applied to test inputs with at most two attempts per test output. Production is intentionally simple and deterministic; experiments are isolated under `tools/` until promoted manually.

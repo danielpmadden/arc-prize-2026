@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from src.arc_solver.types import Grid, Rule
-from src.arc_solver.grid_utils import (
+from .types import Grid, Rule
+from .grid_utils import (
     as_grid, as_rows, constant_grid, crop_non_bg, dedupe_grids, is_valid_grid, most_common_color, shape,
 )
-from src.arc_solver.rules_basic import (
+from .rules_basic import (
     fit_2x2_weave, fit_constant_output, fit_crop_geom_color, fit_geom_and_color,
     fit_kron_self_mask, fit_recolor_by_key_shape, fit_repeated_tile, fit_upscale,
 )
-from src.arc_solver.rules_special import (
+from .rules_special import (
     fit_block_compress, fit_complete_symmetry, fit_expand_crosses_5x5,
     fit_extend_vertical_period, fit_fill_enclosed_regions, fit_fill_rectangles_by_size,
     fit_recolor_components_by_size, fit_recolor_components_by_rank, fit_overlay_two_panels_or,
@@ -121,4 +121,3 @@ def predict_task(task: dict, verbose: bool = False) -> tuple[list[dict], list[st
         })
 
     return task_attempts, rule_names
-

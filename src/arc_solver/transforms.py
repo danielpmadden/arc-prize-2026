@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from src.arc_solver.types import Grid
-from src.arc_solver.grid_utils import shape
+from .types import Grid
+from .grid_utils import shape
 
 
 def identity(g: Grid) -> Grid:

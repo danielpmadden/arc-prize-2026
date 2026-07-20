@@ -1,5 +1,11 @@
 # MIME Composition Experiment
 
+> **Document role: historical experiment record.** This is evidence from a
+> completed, bounded experiment on an earlier branch and commit. It is not a
+> current implementation specification or a directive to continue the work.
+> Consult the repository [`README.md`](../README.md) and current source for the
+> present state.
+
 ## 1. Starting state
 
 - Starting branch: `work`.

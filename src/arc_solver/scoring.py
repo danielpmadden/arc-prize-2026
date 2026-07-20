@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from src.arc_solver.grid_utils import as_grid
-from src.arc_solver.predict import predict_task
+from .grid_utils import as_grid
+from .predict import predict_task
 
 
 def attempt_matches(attempt_record: dict, expected_output) -> bool:

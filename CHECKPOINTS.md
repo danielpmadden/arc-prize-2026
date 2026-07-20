@@ -1,6 +1,11 @@
 # Checkpoints and Milestones
 
-This file records confirmed production score milestones and intentionally keeps chronological detail out of the repo-level README.
+> **Document role: verified historical record.** This file records confirmed
+> production-score milestones. It is not a specification, roadmap, or statement
+> of behavior added after the listed commit. For the current implementation and
+> contributor workflow, start with the repository [`README.md`](README.md).
+
+Chronological detail intentionally remains out of the repo-level README.
 
 ## Milestones
 
